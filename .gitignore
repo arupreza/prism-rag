@@ -187,4 +187,9 @@ train_dir
 *trainer_state*
 *spiece.model*
 .aws
-FastAPI/FastAPI_Model_Deployment/models/qwen_2_5/
+checkpoints/source_model/
+checkpoints/fine_models/
+data/ai_tech/
+data/finance/
+data/medical/
+data/politics/
