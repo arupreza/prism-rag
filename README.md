@@ -3,10 +3,25 @@
 ### Progressive Retrieval with Indexed Summary Memory
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
+
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
-![pgvector](https://img.shields.io/badge/pgvector-HNSW-336791?style=flat-square&logo=postgresql&logoColor=white)
+
+![FastAPI](https://img.shields.io/badge/FastAPI-Latest-009688?style=flat-square&logo=fastapi&logoColor=white)
+
+![Docker](https://img.shields.io/badge/Docker-Latest-2496ED?style=flat-square&logo=docker&logoColor=white)
+
+![LangGraph](https://img.shields.io/badge/LangGraph-Latest-1C3C3C?style=flat-square&logo=langchain&logoColor=white)
+
 ![HuggingFace](https://img.shields.io/badge/HuggingFace-Transformers-FFD21E?style=flat-square&logo=huggingface&logoColor=black)
-![Status](https://img.shields.io/badge/status-WIP%20Phase%201%20of%207-blue?style=flat-square)
+
+![pgvector](https://img.shields.io/badge/pgvector-sparsevec-336791?style=flat-square&logo=postgresql&logoColor=white)
+
+![SPLADE](https://img.shields.io/badge/SPLADE-Vectorless-6C3483?style=flat-square&logoColor=white)
+
+![Qwen](https://img.shields.io/badge/Qwen2.5--7B-AWQ%204bit-FF6F00?style=flat-square&logoColor=white)
+
+![BEIR](https://img.shields.io/badge/BEIR-Benchmark-2ECC71?style=flat-square&logoColor=white)
+
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
 
 > Tree-guided multi-domain Retrieval-Augmented Generation. Build a hierarchical
