@@ -91,7 +91,7 @@ SOURCES = [
         "split":      "train",
         "stream":     True,
         "total_rows": 17_400_000,
-        "default_limit": 500_000,       # cap — 17M is too large for prototype
+        "default_limit": 700_000,       # cap — 17M is too large for prototype
         "desc":       "17.4M US Congressional speeches 1873-2024",
         "normalizer": lambda r: {
             "id":       str(r.get("speech_id", "")),
@@ -117,7 +117,7 @@ SOURCES = [
         "split":      "train",
         "stream":     True,
         "total_rows": 57_100_000,
-        "default_limit": 500_000,       # cap — 57M is too large for prototype
+        "default_limit": 700_000,       # cap — 57M is too large for prototype
         "desc":       "57.1M financial news — Yahoo Finance, CNBC, S&P500 (2008-2025)",
         "normalizer": lambda r: {
             "id":       str(r.get("date", "")) + "_" + str(r.get("text", ""))[:40],
