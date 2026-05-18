@@ -2,28 +2,10 @@
   "base_dir": "/home/lisa/Arupreza/PRISM-RAG/data",
   "hf_token_used": "hf_uaOVk...",
   "domains": [
-    "politics",
     "finance",
-    "ai_tech",
     "medical"
   ],
   "stats": [
-    {
-      "domain": "politics",
-      "name": "cc_news",
-      "count": 708241,
-      "size": "2.10 GB",
-      "pct": "100.0%",
-      "errors": []
-    },
-    {
-      "domain": "politics",
-      "name": "congressional_speeches",
-      "count": 700000,
-      "size": "645.5 MB",
-      "pct": "4.0%",
-      "errors": []
-    },
     {
       "domain": "finance",
       "name": "financial_news",
@@ -31,14 +13,6 @@
       "errors": [
         "Dataset 'Brianferrell787/financial-news-multisource' is a gated dataset on the Hub. Visit the dataset page at https://huggingface.co/datasets/Brianferrell787/financial-news-multisource to ask for access."
       ]
-    },
-    {
-      "domain": "ai_tech",
-      "name": "ml_arxiv_papers",
-      "count": 117592,
-      "size": "171.2 MB",
-      "pct": "99.7%",
-      "errors": []
     },
     {
       "domain": "medical",
@@ -57,5 +31,5 @@
       ]
     }
   ],
-  "downloaded_at": "2026-05-17 21:24:11"
+  "downloaded_at": "2026-05-18 22:27:15"
 }

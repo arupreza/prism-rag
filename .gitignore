@@ -187,6 +187,35 @@ train_dir
 *trainer_state*
 *spiece.model*
 .aws
+
+# Postgres bind-mount data — never commit DB contents
+/postgres-data/
+
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Project artifacts (re-generated)
+/checkpoints/
+*.log
+
+# Local data is huge — exclude from git, keep on disk
+/data/**/*.jsonl
+
 checkpoints/source_model/
 checkpoints/fine_models/
 data/ai_tech/

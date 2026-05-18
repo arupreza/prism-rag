@@ -1,0 +1,61 @@
+# PRISM-RAG — Postgres + pgvector service
+#
+# Phase 1 scope: ONLY the database. Ingest scripts run on the host and connect
+# to localhost:5432.
+#
+# In Phase 5 we'll add: retrieval-agent, generation-agent, gateway.
+#
+# Usage:
+#   docker compose up -d            # start postgres
+#   docker compose logs -f postgres # tail logs (watch for "ready to accept")
+#   docker compose down             # stop (data persists in ./postgres-data)
+#   docker compose down -v          # stop AND wipe data — destructive
+#
+# Data location on host: ./postgres-data/
+#   This survives container restarts. Delete the folder to truly reset.
+
+services:
+  postgres:
+    # pgvector/pgvector ships pgvector pre-built with the official Postgres image.
+    # pg16 is current; pg17 also works. Don't downgrade below pg14.
+    image: pgvector/pgvector:pg16
+    container_name: prism-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-prism}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prism}
+      POSTGRES_DB: ${POSTGRES_DB:-prism_rag}
+      # Enable the extension on first init. After init, `init.sql` will run
+      # CREATE EXTENSION IF NOT EXISTS — both should agree.
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    ports:
+          - "127.0.0.1:5433:5432"     # host 5433 → container 5432
+
+    volumes:
+      # Persist data on the host. Folder is created on first run.
+      - ./postgres-data:/var/lib/postgresql/data
+      # Auto-run init.sql ONLY on first DB initialization (empty data dir).
+      # On subsequent runs this is ignored. To re-apply the schema after edits,
+      # run `python scripts/01_init_db.py` from the host — it's idempotent.
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    # Healthcheck — `docker compose up` won't claim "healthy" until this passes.
+    # Other services in Phase 5 will `depends_on: postgres: condition: service_healthy`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-prism} -d ${POSTGRES_DB:-prism_rag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+    # Modest resource hints. pgvector HNSW build is memory-hungry; raise these
+    # if you scale beyond the prototype.
+    shm_size: 256mb
+
+# No top-level `networks:` block — default bridge network is fine until Phase 5
+# adds multiple services that need to talk to each other.
+#
+# No top-level `volumes:` block — using a bind mount (./postgres-data) instead
+# of a named volume so you can see and back up the data with normal shell tools.

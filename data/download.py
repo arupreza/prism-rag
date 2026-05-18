@@ -4,18 +4,16 @@ PRISM-RAG — Domain Dataset Downloader
 Downloads all available data from verified HuggingFace sources.
 
 Verified data availability:
-┌─────────────────────────────────────────────────────────────────────┐
-│ Domain   │ Source                          │ Total Rows  │ Size     │
-├──────────┼─────────────────────────────────┼─────────────┼──────────┤
-│ politics │ vblagoje/cc_news                │ 708,241     │ 1.12 GB  │
-│ politics │ Eugleo/us-congressional-speeches│ 17,400,000  │ ~50 GB   │
-│ finance  │ financial-news-multisource      │ 57,100,000  │ Very large│
-│ ai_tech  │ CShorten/ML-ArXiv-Papers        │ 118,000     │ ~200 MB  │
-│ medical  │ armanc/scientific_papers pubmed │ 119,924     │ ~1 GB    │
-│ medical  │ armanc/scientific_papers arxiv  │ 203,037     │ ~2 GB    │
-└─────────────────────────────────────────────────────────────────────┘
-
-NOTE: rangeva/political-news-dataset is EMPTY — replaced with fancyzhx/ag_news
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Domain   │ Source                                  │ Total Rows  │ Size     │
+├──────────┼─────────────────────────────────────────┼─────────────┼──────────┤
+│ politics │ vblagoje/cc_news                        │ 708,241     │ 1.12 GB  │
+│ politics │ Eugleo/us-congressional-speeches        │ 17,400,000  │ ~50 GB   │
+│ finance  │ ashraq/financial-news-articles          │ 306,242     │ ~500 MB  │
+│ ai_tech  │ CShorten/ML-ArXiv-Papers                │ 118,000     │ ~200 MB  │
+│ medical  │ ccdv/pubmed-summarization               │ 119,924     │ ~1 GB    │
+│ medical  │ ccdv/arxiv-summarization                │ 203,037     │ ~2 GB    │
+└─────────────────────────────────────────────────────────────────────────────┘
 
 Usage:
     uv run python data/download.py                      # all domains
@@ -49,13 +47,7 @@ print("[✓] HuggingFace login successful")
 
 BASE_DIR = Path("/home/lisa/Arupreza/PRISM-RAG/data")
 
-# ── Dataset sources (all verified) ────────────────────────────────────────────
-#
-# Politics: 2 sources  → ~18M rows total (cc_news + congressional speeches)
-# Finance:  1 source   → 57M rows (capped at 500K default — too large otherwise)
-# AI Tech:  1 source   → 118K rows (download all)
-# Medical:  2 sources  → ~323K rows total (pubmed + arxiv)
-#
+# ── Dataset sources (all verified, public, Parquet-formatted) ─────────────────
 SOURCES = [
 
     # ── POLITICS ──────────────────────────────────────────────────────────────
@@ -112,21 +104,20 @@ SOURCES = [
     {
         "domain":     "finance",
         "name":       "financial_news",
-        "hf_name":    "Brianferrell787/financial-news-multisource",
+        "hf_name":    "ashraq/financial-news-articles",
         "hf_config":  None,
         "split":      "train",
-        "stream":     True,
-        "total_rows": 57_100_000,
-        "default_limit": 700_000,       # cap — 57M is too large for prototype
-        "desc":       "57.1M financial news — Yahoo Finance, CNBC, S&P500 (2008-2025)",
+        "stream":     False,
+        "total_rows": 306_242,
+        "default_limit": None,          # download ALL 306K
+        "desc":       "306K financial news articles from Reuters/CNBC/WSJ (2018)",
         "normalizer": lambda r: {
-            "id":       str(r.get("date", "")) + "_" + str(r.get("text", ""))[:40],
-            "title":    str(r.get("text", ""))[:150],
+            "id":       r.get("url", ""),
+            "title":    r.get("title", ""),
             "text":     r.get("text", ""),
-            "source":   "financial_news_multisource",
+            "source":   "financial_news",
             "metadata": {
-                "date":  str(r.get("date", "")),
-                "extra": str(r.get("extra_fields", "")),
+                "url": r.get("url", ""),
             },
         },
     },
@@ -159,21 +150,20 @@ SOURCES = [
     {
         "domain":     "medical",
         "name":       "pubmed_papers",
-        "hf_name":    "armanc/scientific_papers",
-        "hf_config":  "pubmed",
+        "hf_name":    "ccdv/pubmed-summarization",
+        "hf_config":  "document",
         "split":      "train",
         "stream":     True,
         "total_rows": 119_924,
         "default_limit": None,          # download ALL ~120K
-        "desc":       "119,924 PubMed full text papers",
+        "desc":       "119,924 PubMed full text papers (Cohan et al. 2018, Parquet)",
         "normalizer": lambda r: {
             "id":       str(abs(hash(r.get("article", "")[:100]))),
-            "title":    (r.get("section_names", "") or "PubMed Paper")[:150],
+            "title":    (r.get("abstract", "") or "PubMed Paper")[:150],
             "text":     r.get("article", ""),
-            "source":   "pubmed_scientific_papers",
+            "source":   "pubmed_papers",
             "metadata": {
-                "abstract":      r.get("abstract", ""),
-                "section_names": r.get("section_names", ""),
+                "abstract": r.get("abstract", ""),
             },
         },
     },
@@ -181,21 +171,20 @@ SOURCES = [
     {
         "domain":     "medical",
         "name":       "arxiv_papers",
-        "hf_name":    "armanc/scientific_papers",
-        "hf_config":  "arxiv",
+        "hf_name":    "ccdv/arxiv-summarization",
+        "hf_config":  "document",
         "split":      "train",
         "stream":     True,
         "total_rows": 203_037,
         "default_limit": None,          # download ALL ~203K
-        "desc":       "203,037 ArXiv full text papers",
+        "desc":       "203,037 ArXiv full text papers (Cohan et al. 2018, Parquet)",
         "normalizer": lambda r: {
             "id":       str(abs(hash(r.get("article", "")[:100]))),
-            "title":    (r.get("section_names", "") or "ArXiv Paper")[:150],
+            "title":    (r.get("abstract", "") or "ArXiv Paper")[:150],
             "text":     r.get("article", ""),
-            "source":   "arxiv_scientific_papers",
+            "source":   "arxiv_papers",
             "metadata": {
-                "abstract":      r.get("abstract", ""),
-                "section_names": r.get("section_names", ""),
+                "abstract": r.get("abstract", ""),
             },
         },
     },
@@ -248,7 +237,6 @@ def download_source(src: dict, limit_override=None) -> dict:
     kwargs = dict(
         split=src["split"],
         token=HF_TOKEN,
-        trust_remote_code=True,
         streaming=src["stream"],
     )
     try:
@@ -337,7 +325,6 @@ def main():
     print(f"  Base dir : {BASE_DIR}")
     print(f"  Domains  : {', '.join(args.domains)}")
 
-    # Print availability table
     print(f"\n  Available data:")
     print(f"  {'Domain':<10} {'Source':<35} {'Available':>12}  {'Will download':>14}")
     print(f"  {'-'*10} {'-'*35} {'-'*12}  {'-'*14}")
@@ -360,12 +347,11 @@ def main():
         limit_override = (
             0 if args.no_limit else
             args.limit if args.limit is not None else
-            None   # use source default
+            None
         )
         stats = download_source(src, limit_override=limit_override)
         all_stats.append(stats)
 
-    # Manifest
     manifest = {
         "base_dir":      str(BASE_DIR),
         "hf_token_used": HF_TOKEN[:8] + "...",
