@@ -9,27 +9,27 @@
     {
       "domain": "finance",
       "name": "financial_news",
-      "count": 0,
-      "errors": [
-        "Dataset 'Brianferrell787/financial-news-multisource' is a gated dataset on the Hub. Visit the dataset page at https://huggingface.co/datasets/Brianferrell787/financial-news-multisource to ask for access."
-      ]
+      "count": 306223,
+      "size": "916.0 MB",
+      "pct": "100.0%",
+      "errors": []
     },
     {
       "domain": "medical",
       "name": "pubmed_papers",
-      "count": 0,
-      "errors": [
-        "Dataset scripts are no longer supported, but found scientific_papers.py"
-      ]
+      "count": 117108,
+      "size": "2.27 GB",
+      "pct": "97.7%",
+      "errors": []
     },
     {
       "domain": "medical",
       "name": "arxiv_papers",
-      "count": 0,
-      "errors": [
-        "Dataset scripts are no longer supported, but found scientific_papers.py"
-      ]
+      "count": 202917,
+      "size": "7.19 GB",
+      "pct": "99.9%",
+      "errors": []
     }
   ],
-  "downloaded_at": "2026-05-18 22:27:15"
+  "downloaded_at": "2026-05-18 22:56:17"
 }
