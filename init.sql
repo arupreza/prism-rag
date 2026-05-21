@@ -49,7 +49,13 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks (doc_id);
 -- tree_nodes : ONE table for leaves AND internal cluster nodes.
 --   - level 0  = leaf (is_leaf=true, chunk_id set, summary = chunk text)
 --   - level 1+ = internal (is_leaf=false, chunk_id NULL, summary = LLM output)
--- A single HNSW index serves every level. Retrieval filters by level/parent_id.
+--
+-- HNSW index is NOT created here. It is built AFTER bulk embedding in
+-- scripts/03_embed_chunks.py. Reason: inserting into an existing HNSW index
+-- is ~10× slower than bulk-loading rows first and building the index once.
+-- The script uses: vector_ip_ops (not cosine_ops) because embeddings are
+-- L2-normalized — IP on unit vectors == cosine but skips re-normalization.
+-- ef_construction = 200 (not 64) for adequate recall on 1024-d vectors.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tree_nodes (
     node_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -58,7 +64,7 @@ CREATE TABLE IF NOT EXISTS tree_nodes (
     level          INT NOT NULL,                        -- 0 = leaf
     is_leaf        BOOLEAN NOT NULL,
     parent_id      UUID REFERENCES tree_nodes(node_id) ON DELETE CASCADE,
-    chunk_id       UUID REFERENCES chunks(chunk_id),    -- non-null iff is_leaf
+    chunk_id       UUID UNIQUE REFERENCES chunks(chunk_id),  -- UNIQUE: one leaf per chunk, enables ON CONFLICT
     title          TEXT,                                -- LLM-generated for clusters
     summary        TEXT,                                -- LLM-gen for clusters; chunk text for leaves
     n_descendants  INT,                                 -- # of level-0 leaves under this node
@@ -67,12 +73,22 @@ CREATE TABLE IF NOT EXISTS tree_nodes (
     embed_input    TEXT,                                -- exact text fed to encoder (reproducibility)
     created_at     TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- B-tree indexes for filtered queries and tree traversal
 CREATE INDEX IF NOT EXISTS idx_tree_nodes_dom_src_lvl
     ON tree_nodes (domain, source, level);
 CREATE INDEX IF NOT EXISTS idx_tree_nodes_parent
     ON tree_nodes (parent_id);
-CREATE INDEX IF NOT EXISTS idx_tree_nodes_chunk
-    ON tree_nodes (chunk_id);
-CREATE INDEX IF NOT EXISTS idx_tree_nodes_hnsw
-    ON tree_nodes USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_tree_nodes_level
+    ON tree_nodes (level);
+
+-- ============================================================================
+-- HNSW vector index — DO NOT CREATE HERE.
+-- Built by scripts/03_embed_chunks.py AFTER all level-0 embeddings are loaded.
+--
+--   CREATE INDEX idx_tree_nodes_hnsw
+--       ON tree_nodes USING hnsw (embedding vector_ip_ops)
+--       WITH (m = 16, ef_construction = 200);
+--
+-- Rebuild after Phase 3 adds internal nodes (DROP + CREATE, or REINDEX).
+-- ============================================================================

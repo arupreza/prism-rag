@@ -52,7 +52,7 @@ services:
 
     # Modest resource hints. pgvector HNSW build is memory-hungry; raise these
     # if you scale beyond the prototype.
-    shm_size: 256mb
+    shm_size: 8gb
 
 # No top-level `networks:` block — default bridge network is fine until Phase 5
 # adds multiple services that need to talk to each other.

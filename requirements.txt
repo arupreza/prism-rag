@@ -1,0 +1,6 @@
+psycopg[binary]>=3.1
+pgvector>=0.3
+python-dotenv
+transformers
+FlagEmbedding>=1.2
+numpy
