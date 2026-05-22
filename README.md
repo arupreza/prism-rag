@@ -76,21 +76,29 @@ All nodes (leaves + summaries) indexed in one pgvector HNSW index
 
 ### Online: Answering a query
 
-```
-User query
-    │
-    ▼
-[Phase 4] Encode query with BGE-M3
-           Start at the top of the tree
-           At each level, compare query to node summaries
-           Prune branches that don't match → drill into matching ones
-           Reach the leaf chunks → return top-k
-    │
-    ▼
-[Phase 5] Feed retrieved chunks + query to Qwen-7B
-           Generate a cited answer
-           Return to user via FastAPI
-```
+The diagram below walks through a concrete example — *"What was the Bitcoin
+price in 2018?"* — showing each step from user input to cited answer:
+
+<p align="center">
+  <img src="docs/query_flow.png" alt="PRISM-RAG Query Flow" width="550">
+</p>
+
+**Step by step:**
+
+1. **Query Input** — The user sends a natural language question.
+2. **Domain Routing** (Python / LangGraph) — An LLM reads the query and
+   identifies the target domain (`finance`). BGE-M3 encodes the query into a
+   1024-d vector.
+3. **Level 1 Search** (PostgreSQL + pgvector) — HNSW finds the most similar
+   cluster summaries within the `finance` domain. Returns the best-matching
+   cluster (e.g. `cluster_id=42`, "Cryptocurrency cluster").
+4. **Level 0 Search** (PostgreSQL + pgvector) — Searches only the leaf chunks
+   inside the matching cluster. Returns the top-k most relevant chunks
+   (e.g. chunks about Bitcoin prices in 2018).
+5. **Answer Generation** (Qwen2.5-7B) — The retrieved chunks are passed to
+   the language model, which generates a cited answer grounded in the evidence.
+6. **Answer Returned** — The user receives the final answer with source
+   citations pointing back to the original chunks.
 
 ---
 
@@ -270,6 +278,9 @@ PRISM-RAG/
 ├── docker-compose.yml           ← Postgres + pgvector container
 ├── requirements.txt
 ├── .env.example
+│
+├── docs/                        ← diagrams and documentation assets
+│   └── query_flow.png           ← end-to-end query flow diagram
 │
 ├── data/                        ← downloaded JSONL (politics/finance/ai_tech/medical)
 │   └── download.py              ← HuggingFace dataset downloader

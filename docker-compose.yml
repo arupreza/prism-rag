@@ -1,7 +1,7 @@
 # PRISM-RAG — Postgres + pgvector service
 #
 # Phase 1 scope: ONLY the database. Ingest scripts run on the host and connect
-# to localhost:5432.
+# to localhost:5433.
 #
 # In Phase 5 we'll add: retrieval-agent, generation-agent, gateway.
 #
@@ -26,12 +26,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-prism}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prism}
       POSTGRES_DB: ${POSTGRES_DB:-prism_rag}
-      # Enable the extension on first init. After init, `init.sql` will run
-      # CREATE EXTENSION IF NOT EXISTS — both should agree.
       PGDATA: /var/lib/postgresql/data/pgdata
 
     ports:
-          - "127.0.0.1:5433:5432"     # host 5433 → container 5432
+      - "127.0.0.1:5433:5432"     # host 5433 → container 5432
 
     volumes:
       # Persist data on the host. Folder is created on first run.
@@ -50,9 +48,55 @@ services:
       retries: 10
       start_period: 10s
 
-    # Modest resource hints. pgvector HNSW build is memory-hungry; raise these
-    # if you scale beyond the prototype.
+    # ── Resource allocation (tuned for 128GB host) ───────────────────────────
+    #
+    # shm_size: Postgres shared memory. Used by HNSW index builds, sort
+    #   operations, and hash joins. 8GB is comfortable for building HNSW
+    #   over 2.5M × 1024-d vectors.
+    #
+    # memory limit: Hard cap prevents Postgres from swapping if something
+    #   goes wrong. 16GB is generous for the prototype; raise to 32GB for
+    #   the full 2.5M corpus run.
     shm_size: 8gb
+    deploy:
+      resources:
+        limits:
+          memory: 16gb
+
+    # ── Postgres tuning via command-line flags ───────────────────────────────
+    #
+    # These override postgresql.conf defaults without needing a custom config
+    # file. Tuned for a batch-ingest + HNSW-build workload on a 128GB host.
+    #
+    # shared_buffers:     Postgres page cache. 4GB is ~25% of the 16GB
+    #                     container limit — standard recommendation.
+    # work_mem:           Per-sort/hash memory. 256MB handles large ORDER BY
+    #                     and GROUP BY during tree queries.
+    # maintenance_work_mem: Used by CREATE INDEX, VACUUM, ANALYZE. 8GB lets
+    #                     HNSW index build hold the graph in memory.
+    # effective_cache_size: Hint to query planner about OS page cache.
+    #                     Doesn't allocate memory — just improves plans.
+    # wal_buffers:        Write-ahead log buffer. 64MB smooths bulk inserts.
+    # checkpoint_completion_target: Spread checkpoint I/O over more time to
+    #                     avoid write stalls during bulk loads.
+    # max_wal_size:       Allow more WAL before forced checkpoint. Reduces
+    #                     checkpoint frequency during bulk inserts.
+    command:
+      - "postgres"
+      - "-c" 
+      - "shared_buffers=4GB"
+      - "-c"
+      - "work_mem=256MB"
+      - "-c"
+      - "maintenance_work_mem=8GB"
+      - "-c"
+      - "effective_cache_size=12GB"
+      - "-c"
+      - "wal_buffers=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "max_wal_size=4GB"
 
 # No top-level `networks:` block — default bridge network is fine until Phase 5
 # adds multiple services that need to talk to each other.
