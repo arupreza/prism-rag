@@ -104,143 +104,49 @@ price in 2018?"* — showing each step from user input to cited answer:
 
 ## What has been built so far
 
-### Phase 1 — Data ingestion & chunking ✅
+### Phase 1 — Ingestion & chunking ✅
+Pulls documents from HuggingFace into PostgreSQL, then cuts each one into pieces
+of at most 512 tokens. Why cut them? The embedding model can only "read" 512
+tokens at a time — anything longer gets ignored. Each piece overlaps the next by
+64 tokens so a sentence sitting on a cut line still appears whole in one of them.
+Re-running the script is safe: it skips documents already loaded.
+**Result:** a `documents` table (full articles) and a `chunks` table (the pieces).
 
-**What it does:** Downloads documents from HuggingFace datasets, stores them
-in PostgreSQL, and splits each document into overlapping chunks of ≤512 tokens.
+### Phase 2 — Embedding the chunks ✅
+Turns every chunk into a list of 1024 numbers (a "vector") using BGE-M3. Chunks
+with similar meaning get similar vectors, which is what lets us search by meaning
+instead of keywords. Each vector is scaled to length 1, a small trick that makes
+similarity search faster. After all vectors are stored, we build one HNSW index —
+a structure that finds nearest vectors quickly. We build it *after* loading
+everything because building it once at the end is far faster than updating it row
+by row.
+**Result:** every chunk now lives in `tree_nodes` as a level-0 "leaf" with its
+vector, plus a search index over them.
 
-**Why chunking matters:** The embedding model (BGE-M3) has a context window.
-Documents longer than 512 tokens must be split, or content beyond the limit
-gets silently ignored. Overlapping chunks (64 tokens overlap) ensure sentences
-near a split boundary appear in both chunks, so nothing falls through the cracks.
+### Phase 3 — Building the topic tree ✅
+This is where the "tree" gets built, bottom-up, separately for each source. The
+idea (from the RAPTOR paper): group related chunks, summarize each group, then
+treat those summaries as a higher layer and repeat — like turning thousands of
+notes into chapter summaries, then a book summary.
 
-**Key design decisions:**
-- Tokenizer used for chunking is the *same* tokenizer BGE-M3 uses internally.
-  This guarantees the token count is exact — no surprises at encoding time.
-- Idempotent ingestion: re-running the script skips already-inserted documents
-  (uses `ON CONFLICT DO NOTHING` on a unique key). Safe to restart after crashes.
-- Prototype cap of 5,000 documents per source keeps iteration fast while
-  developing. Removed for the full run.
+- **Group similar chunks.** 1024 numbers is too many dimensions for grouping to
+  work well, so UMAP first squeezes them down to 10. Then HDBSCAN finds the
+  natural groups by density — we don't tell it how many groups to expect, it
+  figures that out. A few chunks land in no group ("noise"); we attach each to
+  its closest group so no chunk is ever left behind and lost from the tree.
+- **Summarize each group.** A local Qwen2.5-7B model writes a short title and
+  summary for every group. It runs inside the same program (no separate server to
+  start), and big groups are summarized in batches so they never overflow the
+  model's reading limit.
+- **Repeat upward.** Those summaries get embedded and grouped again into a higher
+  level, up to 4 levels, stopping once everything folds into a single group.
+- **Safe to re-run.** The database is wired so that deleting a summary node would
+  also delete its child chunks. To avoid wiping Phase 2 on a rebuild, we
+  disconnect the links first, then delete only the summary nodes.
 
-**Database state after Phase 1:**
-- `documents` table: one row per original article/paper/speech
-- `chunks` table: one row per ≤512-token piece, linked to its parent document
-
----
-
-### Phase 2 — Dense embedding & leaf node construction ✅
-
-**What it does:** Encodes every chunk into a 1024-dimensional dense vector
-using BGE-M3, stores each as a level-0 (leaf) node in the `tree_nodes` table,
-and builds an HNSW vector index over all nodes.
-
-**How embedding works:** BGE-M3 is a transformer encoder (568M parameters).
-It reads the chunk text, processes it through attention layers, and outputs a
-single 1024-number vector that captures the semantic meaning of that text.
-Similar texts produce vectors that point in similar directions in 1024-d space.
-
-**Why we normalize vectors:** Every vector is scaled to unit length (L2 norm = 1).
-This lets us use inner product (IP) for similarity search instead of cosine
-similarity. On normalized vectors, IP and cosine give identical rankings, but
-IP skips the per-comparison normalization step — roughly 3× fewer floating-point
-operations per comparison. At millions of vectors and hundreds of comparisons
-per query, this matters.
-
-**Why HNSW index is built after loading, not before:** HNSW is a graph-based
-index. Inserting into an existing graph requires finding neighbors and updating
-edges for each new row — ~10× slower than loading all rows first and
-constructing the graph in one optimized pass.
-
-**HNSW parameters chosen:**
-- `m = 16` — each node connects to 16 neighbors. Standard for ≥256-d vectors.
-- `ef_construction = 200` — how many candidates the builder evaluates when
-  picking neighbors. Higher = better graph quality, slower build. 200 is the
-  recommended setting for 1024-d.
-- Operator class: `vector_ip_ops` — inner product, paired with normalized
-  vectors (see above).
-
-**Key design decisions:**
-- Server-side cursor streams chunks from Postgres in pages of 2,000 rows.
-  Python memory stays flat regardless of corpus size.
-- `withhold=True` on the cursor so it survives periodic `COMMIT` calls
-  (otherwise Postgres destroys server-side cursors when the transaction ends).
-- Resumable: chunks that already have a tree_node are skipped via `NOT EXISTS`.
-
-**Database state after Phase 2:**
-- `tree_nodes` table: one row per chunk, `level=0`, `is_leaf=true`, with a
-  1024-d embedding vector
-- HNSW index over all tree_nodes (initially only leaves; internal nodes from
-  Phase 3 are added to the same index)
-
----
-
-### Phase 3 — Hierarchical tree construction ✅
-
-**What it does:** Groups the level-0 leaves into topic clusters, asks an LLM to
-write a title + summary for each cluster, embeds those summaries as new internal
-nodes one level up, and repeats — building a bottom-up topic tree per
-`(domain, source)`. This is the RAPTOR construction (Sarthi et al., ICLR 2024)
-adapted to a per-source layout and HDBSCAN clustering.
-
-**The clustering pipeline (one level):**
-1. **UMAP** reduces the 1024-d BGE-M3 vectors to a low-dimensional manifold
-   (`UMAP_N_COMPONENTS=10`, cosine metric — appropriate because the vectors are
-   L2-normalized). Density-based clustering is unreliable in 1024-d due to the
-   curse of dimensionality; UMAP makes the density structure recoverable.
-2. **HDBSCAN** discovers clusters by density (`MIN_CLUSTER_SIZE=8`). Unlike
-   k-means it does not require a preset cluster count and it tolerates clusters
-   of varying size and shape.
-3. **Noise reassignment** sends every HDBSCAN noise point (label `-1`) to its
-   nearest cluster centroid. This is mandatory: an unassigned leaf would get no
-   parent and silently disappear from every level above the leaves, dropping
-   documents from the tree.
-
-**Summarization (map-reduce):** A single cluster can hold hundreds of leaves —
-far more text than fits in one context window. Member texts are packed into
-char-budgeted blocks (~18k chars each); every block is summarized, then the
-block summaries are summarized again. This bounds every LLM call regardless of
-cluster size instead of truncating and losing information.
-
-**Why per-source subtrees:** Online retrieval routes `domain → source → cluster
-→ leaf`, so each source gets its own subtree and the `source` column stays
-populated on every internal node. Cross-source summaries would be incoherent and
-would undermine domain routing.
-
-**Recursion and termination:** After level 1 summaries are created, they become
-the input to level 2 clustering, and so on, up to `MAX_TREE_LEVELS=4`. A level
-that collapses to a single cluster terminates that subtree early. Each new level
-is embedded in a single batched BGE-M3 pass (one encode per level, not one per
-cluster).
-
-**Idempotent rebuilds — and a schema footgun:** `tree_nodes.parent_id` is
-`REFERENCES tree_nodes ON DELETE CASCADE`. Because leaves point at level-1 nodes,
-a naive `DELETE FROM tree_nodes WHERE level >= 1` would cascade and delete the
-leaves too — destroying Phase 2. The rebuild path therefore **nulls all
-`parent_id` links first**, then deletes the now-childless internal nodes, so no
-cascade can reach the leaves. Re-running `04_build_tree.py` is safe per source.
-
-**Summarizer choice (in-process, not a server):** Cluster summaries are generated
-by a local Qwen2.5-7B-Instruct checkpoint loaded directly via `transformers`
-(greedy decoding for deterministic, reproducible trees). There is no separate
-inference server and no network dependency during the build — the model loads in
-the same process as the clustering code, mirroring how BGE-M3 is already used. A
-vLLM/OpenAI-compatible HTTP backend remains a drop-in alternative for speed at
-larger scale, but is not required.
-
-**Key design decisions:**
-- Internal nodes are inserted with `is_leaf=false`, `chunk_id=NULL`, an
-  LLM-written `title` and `summary`, `n_descendants` (sum of child leaf counts),
-  and `cluster_meta` (`{method, level, size, silhouette}`) for later analysis.
-- The summary text is what gets embedded (`embed_input = summary`), so cluster
-  nodes are matched on the same semantic basis as leaves.
-- New internal nodes are auto-indexed by the existing HNSW index on insert; the
-  build runs `ANALYZE tree_nodes` at the end to refresh planner statistics.
-
-**Database state after Phase 3:**
-- `tree_nodes` table: leaves (`level=0`) plus internal cluster nodes
-  (`level≥1`, `is_leaf=false`), every node linked to its parent via `parent_id`
-- A single HNSW index spanning all levels — retrieval can search any level via a
-  `level` filter, or all levels at once (collapsed-tree retrieval)
+**Result:** `tree_nodes` now holds the original chunks (level 0) *and* the
+summary nodes above them (level 1+), all connected parent-to-child and searchable
+through the same index.
 
 ---
 
