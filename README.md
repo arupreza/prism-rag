@@ -9,7 +9,7 @@
 > into a hierarchical topic tree — like a library with sections, shelves, and
 > books — so queries find the right information faster and with less noise.
 
-> **Status:** Phases 1–2 of 7 complete. Full roadmap in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+> **Status:** Phases 1–3 of 7 complete. Full roadmap in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
@@ -65,10 +65,10 @@ Raw documents (JSONL files)
     │
     ▼
 [Phase 3] Group similar chunks using UMAP + HDBSCAN clustering
-           Ask Qwen-32B to write a title + summary for each cluster
+           Ask Qwen2.5 to write a title + summary for each cluster
            Encode that summary → becomes a level-1 node
            Repeat upward → level 2, 3, 4...
-           Result: a tree with ~4–5 levels
+           Result: a per-source tree with up to 4 levels above the leaves
     │
     ▼
 All nodes (leaves + summaries) indexed in one pgvector HNSW index
@@ -169,8 +169,78 @@ constructing the graph in one optimized pass.
 **Database state after Phase 2:**
 - `tree_nodes` table: one row per chunk, `level=0`, `is_leaf=true`, with a
   1024-d embedding vector
-- HNSW index over all tree_nodes (currently only leaves; internal nodes from
-  Phase 3 will be added to the same index)
+- HNSW index over all tree_nodes (initially only leaves; internal nodes from
+  Phase 3 are added to the same index)
+
+---
+
+### Phase 3 — Hierarchical tree construction ✅
+
+**What it does:** Groups the level-0 leaves into topic clusters, asks an LLM to
+write a title + summary for each cluster, embeds those summaries as new internal
+nodes one level up, and repeats — building a bottom-up topic tree per
+`(domain, source)`. This is the RAPTOR construction (Sarthi et al., ICLR 2024)
+adapted to a per-source layout and HDBSCAN clustering.
+
+**The clustering pipeline (one level):**
+1. **UMAP** reduces the 1024-d BGE-M3 vectors to a low-dimensional manifold
+   (`UMAP_N_COMPONENTS=10`, cosine metric — appropriate because the vectors are
+   L2-normalized). Density-based clustering is unreliable in 1024-d due to the
+   curse of dimensionality; UMAP makes the density structure recoverable.
+2. **HDBSCAN** discovers clusters by density (`MIN_CLUSTER_SIZE=8`). Unlike
+   k-means it does not require a preset cluster count and it tolerates clusters
+   of varying size and shape.
+3. **Noise reassignment** sends every HDBSCAN noise point (label `-1`) to its
+   nearest cluster centroid. This is mandatory: an unassigned leaf would get no
+   parent and silently disappear from every level above the leaves, dropping
+   documents from the tree.
+
+**Summarization (map-reduce):** A single cluster can hold hundreds of leaves —
+far more text than fits in one context window. Member texts are packed into
+char-budgeted blocks (~18k chars each); every block is summarized, then the
+block summaries are summarized again. This bounds every LLM call regardless of
+cluster size instead of truncating and losing information.
+
+**Why per-source subtrees:** Online retrieval routes `domain → source → cluster
+→ leaf`, so each source gets its own subtree and the `source` column stays
+populated on every internal node. Cross-source summaries would be incoherent and
+would undermine domain routing.
+
+**Recursion and termination:** After level 1 summaries are created, they become
+the input to level 2 clustering, and so on, up to `MAX_TREE_LEVELS=4`. A level
+that collapses to a single cluster terminates that subtree early. Each new level
+is embedded in a single batched BGE-M3 pass (one encode per level, not one per
+cluster).
+
+**Idempotent rebuilds — and a schema footgun:** `tree_nodes.parent_id` is
+`REFERENCES tree_nodes ON DELETE CASCADE`. Because leaves point at level-1 nodes,
+a naive `DELETE FROM tree_nodes WHERE level >= 1` would cascade and delete the
+leaves too — destroying Phase 2. The rebuild path therefore **nulls all
+`parent_id` links first**, then deletes the now-childless internal nodes, so no
+cascade can reach the leaves. Re-running `04_build_tree.py` is safe per source.
+
+**Summarizer choice (in-process, not a server):** Cluster summaries are generated
+by a local Qwen2.5-7B-Instruct checkpoint loaded directly via `transformers`
+(greedy decoding for deterministic, reproducible trees). There is no separate
+inference server and no network dependency during the build — the model loads in
+the same process as the clustering code, mirroring how BGE-M3 is already used. A
+vLLM/OpenAI-compatible HTTP backend remains a drop-in alternative for speed at
+larger scale, but is not required.
+
+**Key design decisions:**
+- Internal nodes are inserted with `is_leaf=false`, `chunk_id=NULL`, an
+  LLM-written `title` and `summary`, `n_descendants` (sum of child leaf counts),
+  and `cluster_meta` (`{method, level, size, silhouette}`) for later analysis.
+- The summary text is what gets embedded (`embed_input = summary`), so cluster
+  nodes are matched on the same semantic basis as leaves.
+- New internal nodes are auto-indexed by the existing HNSW index on insert; the
+  build runs `ANALYZE tree_nodes` at the end to refresh planner statistics.
+
+**Database state after Phase 3:**
+- `tree_nodes` table: leaves (`level=0`) plus internal cluster nodes
+  (`level≥1`, `is_leaf=false`), every node linked to its parent via `parent_id`
+- A single HNSW index spanning all levels — retrieval can search any level via a
+  `level` filter, or all levels at once (collapsed-tree retrieval)
 
 ---
 
@@ -225,7 +295,7 @@ keep iteration cycles short.
                 │      ▼  BGE-M3 dense encode           (Phase 2)│
                 │  tree_nodes  (level 0 = leaf chunks)           │
                 │      │                                         │
-                │      ▼  UMAP → HDBSCAN → Qwen-32B    (Phase 3)│
+                │      ▼  UMAP → HDBSCAN → Qwen2.5-7B   (Phase 3)│
                 │      │  summarize → embed → store              │
                 │  tree_nodes  (levels 1..k = cluster summaries) │
                 │      │                                         │
@@ -244,8 +314,8 @@ keep iteration cycles short.
 | Database | PostgreSQL 16 + pgvector (Docker) |
 | Vector index | HNSW with `vector_ip_ops` on normalized 1024-d vectors |
 | Embedding model | `BAAI/bge-m3` (1024-d dense, 512-token context) |
-| Clustering | UMAP (dimensionality reduction) + HDBSCAN (cluster discovery) |
-| Cluster summarizer | `Qwen/Qwen2.5-32B-Instruct` via vLLM |
+| Clustering | UMAP (dimensionality reduction) + HDBSCAN (cluster discovery) + noise reassignment |
+| Cluster summarizer | Local `Qwen2.5-7B-Instruct` checkpoint via `transformers` (in-process, greedy) |
 | Generator | `Qwen/Qwen2.5-7B-Instruct` (v0.1) → QLoRA + AWQ in v0.2 |
 | Orchestration | LangGraph StateGraph (Phase 5) |
 | API | FastAPI + uvicorn (Phase 5) |
@@ -260,8 +330,8 @@ keep iteration cycles short.
 |---|---|---|
 | 1 | Data ingestion + token-aware chunking | ✅ Done |
 | 2 | BGE-M3 dense embedding + HNSW index | ✅ Done |
-| 3 | UMAP + HDBSCAN clustering + LLM summaries (tree build) | ⏳ Next |
-| 4 | Tree-guided retrieval (CLI → FastAPI) | ⏳ Planned |
+| 3 | UMAP + HDBSCAN clustering + LLM summaries (tree build) | ✅ Done |
+| 4 | Tree-guided retrieval (CLI → FastAPI) | ⏳ Next |
 | 5 | Qwen-7B generation + LangGraph gateway + Docker stack | ⏳ Planned |
 | 6 | QLoRA fine-tune + AWQ quantization per domain *(optional)* | ⏳ Planned |
 | 7 | Synthetic eval set + retrieval & generation metrics | ⏳ Planned |
@@ -285,6 +355,9 @@ PRISM-RAG/
 ├── data/                        ← downloaded JSONL (politics/finance/ai_tech/medical)
 │   └── download.py              ← HuggingFace dataset downloader
 │
+├── checkpoints/                 ← model weights
+│   └── source_model/qwen_2_5/   ← local Qwen2.5-7B-Instruct (Phase 3 summarizer)
+│
 ├── agents/
 │   ├── ingestion/               ← Phases 1–2: batch ingest + embed
 │   │   ├── config.py            ← paths, model names, hyperparameters
@@ -294,19 +367,21 @@ PRISM-RAG/
 │   │   ├── encoder.py           ← BGE-M3 dense encoder wrapper
 │   │   └── embed_leaves.py      ← chunks → tree_nodes level 0
 │   ├── tree_builder/            ← Phase 3: cluster + summarize
+│   │   ├── cluster.py           ← UMAP reduce + HDBSCAN + noise reassignment
+│   │   ├── summarizer.py        ← in-process Qwen2.5 summarizer (map-reduce)
+│   │   └── build.py             ← recursive per-source tree construction
 │   ├── retrieval/               ← Phase 4: tree-guided search
 │   └── generation/              ← Phase 5: Qwen inference
 │
 ├── gateway/                     ← Phase 5: FastAPI + LangGraph orchestrator
 ├── training/                    ← Phase 6: QLoRA → merge → AWQ
 ├── evaluation/                  ← Phase 7: synthetic eval + metrics
-├── checkpoints/                 ← Phase 6: LoRA adapters, AWQ models
 │
 └── scripts/                     ← numbered entry points
     ├── 01_init_db.py            ← apply schema to Postgres
     ├── 02_ingest.py             ← ingest JSONL → documents + chunks
     ├── 03_embed_chunks.py       ← embed chunks + build HNSW index
-    ├── 04_build_tree.py         ← (Phase 3)
+    ├── 04_build_tree.py         ← cluster + summarize → internal nodes (Phase 3)
     ├── 05_query_cli.py          ← (Phase 4)
     └── 06_benchmark.py          ← (Phase 7)
 ```
@@ -316,7 +391,9 @@ PRISM-RAG/
 ## Quick start
 
 **Prerequisites:** Python 3.10+, Docker, ~10 GB free disk, GPU recommended
-for embedding (CPU works but slower).
+for embedding and summarization (CPU works but slower). A local
+Qwen2.5-7B-Instruct checkpoint under `checkpoints/source_model/qwen_2_5/` for
+Phase 3 (point `SUMMARIZER_MODEL` in `agents/ingestion/config.py` at it).
 
 ```bash
 git clone https://github.com/Arupreza/PRISM-RAG
@@ -324,7 +401,7 @@ cd PRISM-RAG
 
 # Install dependencies
 uv venv && source .venv/bin/activate
-uv pip install -r requirements.txt
+uv pip install -r requirements.txt        # note: uv venvs have no `pip`; use `uv pip`
 
 # Configure
 cp .env.example .env
@@ -342,6 +419,13 @@ python scripts/02_ingest.py
 
 # Phase 2: Embed chunks + build HNSW index
 python scripts/03_embed_chunks.py
+
+# Phase 3: Cluster + summarize → build the topic tree
+python scripts/04_build_tree.py
+#   options:
+#     --domain medical     build a subset of domains
+#     --no-rebuild         keep existing internal nodes
+#   tip: set EMBED_DEVICE=cpu if the summarizer and BGE-M3 compete for VRAM
 ```
 
 **Verify everything worked:**
@@ -362,7 +446,24 @@ SELECT
 -- Phase 2: HNSW index exists
 SELECT indexname FROM pg_indexes
 WHERE tablename = 'tree_nodes' AND indexname LIKE '%hnsw%';
+
+-- Phase 3: nodes per level (level 0 = leaves, level ≥1 = cluster summaries)
+SELECT level, COUNT(*) FROM tree_nodes GROUP BY level ORDER BY level;
+
+-- Phase 3: no leaf was dropped (must return 0)
+SELECT COUNT(*) FROM tree_nodes WHERE level=0 AND parent_id IS NULL;
+
+-- Phase 3: tree shape per source
+SELECT domain, source, MAX(level) AS depth FROM tree_nodes
+GROUP BY domain, source ORDER BY domain, source;
+
+-- Phase 3: inspect the largest clusters
+SELECT title, n_descendants FROM tree_nodes
+WHERE level >= 1 ORDER BY n_descendants DESC LIMIT 10;
 ```
+
+The `scripts/04_build_tree.py` run prints the same verification at the end,
+including a `n_descendants` vs leaf-count reconciliation per source.
 
 ---
 
