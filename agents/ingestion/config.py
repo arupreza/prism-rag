@@ -61,7 +61,10 @@ UMAP_N_COMPONENTS = 10         # dim reduction target before clustering
 
 
 # ── Summarizer LLM (Phase 3) ─────────────────────────────────────────────────
-SUMMARIZER_MODEL = "Qwen/Qwen2.5-32B-Instruct"
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+SUMMARIZER_MODEL = str(PROJECT_ROOT / "checkpoints/source_model/qwen_2_5")
 SUMMARIZER_URL   = os.getenv("SUMMARIZER_URL", "http://localhost:8000/v1")  # vLLM OpenAI-compat
 SUMMARIZER_KEY   = os.getenv("SUMMARIZER_KEY", "EMPTY")                    # vLLM ignores it
 
