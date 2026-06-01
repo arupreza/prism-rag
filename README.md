@@ -9,7 +9,7 @@
 > into a hierarchical topic tree — like a library with sections, shelves, and
 > books — so queries find the right information faster and with less noise.
 
-> **Status:** Phases 1–3 of 7 complete. Full roadmap in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+> **Status:** Phases 1–4 of 7 complete. Full roadmap in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
@@ -148,6 +148,43 @@ notes into chapter summaries, then a book summary.
 summary nodes above them (level 1+), all connected parent-to-child and searchable
 through the same index.
 
+### Phase 4 — Tree-guided retrieval ✅
+The tree built in Phase 3 only pays off if queries actually walk it correctly at
+run time. This phase ships two ways to do that walk, plus a CLI for debugging
+and a FastAPI service for everything downstream to call.
+
+- **Top-down beam traversal.** Encode the query, find the best-matching tree
+  roots (one root per source), then keep the top-`beam` children at each step
+  down to the leaves. Beam width is set to 6 instead of 1 because greedy descent
+  compounds early clustering mistakes — keeping a handful of candidates per level
+  lets the search recover from a wrong turn near the top. The final answer set
+  is the top-`k` leaves under the last internal frontier, fetched in one
+  recursive descent so a tight final-step beam never caps leaf recall.
+- **Collapsed + ancestor boost.** Search the whole tree in one flat HNSW pass,
+  then for each leaf candidate add a bonus proportional to its strongest
+  ancestor-cluster similarity: `combined = leaf_sim + α · max(ancestor_sim)`.
+  A leaf that sits under a strongly on-topic cluster wins over a leaf that
+  lexically matches but belongs to the wrong topic. The cluster summary acts as
+  a learned topic prior.
+- **One round trip per descent step.** Children at the next level are fetched
+  with `WHERE parent_id = ANY(frontier)`, hitting the b-tree parent index — no
+  extra ANN call per branch. `hnsw.ef_search` is raised per transaction (not
+  per session), so the bump stays scoped and never leaks across pooled
+  connections.
+- **Same code, two surfaces.** `scripts/05_query_cli.py` calls the search code
+  directly so retrieval can be debugged without HTTP. `agents/retrieval/main.py`
+  wraps the same code in FastAPI (`POST /retrieve`, plus `/healthz` and
+  `/readyz`) and ships in a uv-based Docker image. The encoder is loaded once
+  in a lifespan handler so the first request doesn't pay startup tax.
+
+Which strategy wins on real data is the open question for Phase 7's evaluation.
+We deliberately ship both — picking one before measuring is the kind of decision
+that haunts you later.
+
+**Result:** retrieval service at `http://localhost:8001`. `POST /retrieve`
+returns the top-`k` leaf chunks plus the tree path walked to find them, so
+downstream generation can both cite the chunks and explain why they were chosen.
+
 ---
 
 ## Corpus (4 domains)
@@ -175,14 +212,14 @@ keep iteration cycles short.
                 │            ONLINE  (Phases 4–5)                │
                 ├────────────────────────────────────────────────┤
                 │                                                │
-   User Query ─►│  Gateway (FastAPI + LangGraph)                 │
+   User Query ─►│  Gateway (FastAPI + LangGraph)        ⏳ Ph 5  │
                 │      │                                         │
                 │      ▼                                         │
-                │  Retrieval Agent  ── tree-guided search        │
-                │      │   (top-down traversal: domain → source  │
-                │      │    → topic clusters → leaf chunks)      │
+                │  Retrieval Agent  ── tree-guided search ✅ Ph 4│
+                │      │   (top-down beam OR collapsed re-rank)  │
+                │      │    domain → source → clusters → leaves  │
                 │      ▼                                         │
-                │  Generation Agent ── Qwen2.5-7B                │
+                │  Generation Agent ── Qwen2.5-7B       ⏳ Ph 5  │
                 │      │   (cited answer)                        │
                 │      ▼                                         │
                 │  Final Answer ───────────────────────► User    │
@@ -222,9 +259,9 @@ keep iteration cycles short.
 | Embedding model | `BAAI/bge-m3` (1024-d dense, 512-token context) |
 | Clustering | UMAP (dimensionality reduction) + HDBSCAN (cluster discovery) + noise reassignment |
 | Cluster summarizer | Local `Qwen2.5-7B-Instruct` checkpoint via `transformers` (in-process, greedy) |
+| Retrieval service | FastAPI + uvicorn, uv-based Docker image (Phase 4) |
 | Generator | `Qwen/Qwen2.5-7B-Instruct` (v0.1) → QLoRA + AWQ in v0.2 |
 | Orchestration | LangGraph StateGraph (Phase 5) |
-| API | FastAPI + uvicorn (Phase 5) |
 | Container runtime | Docker + docker-compose |
 | Experiment tracking | Weights & Biases (Phase 6) |
 
@@ -237,8 +274,8 @@ keep iteration cycles short.
 | 1 | Data ingestion + token-aware chunking | ✅ Done |
 | 2 | BGE-M3 dense embedding + HNSW index | ✅ Done |
 | 3 | UMAP + HDBSCAN clustering + LLM summaries (tree build) | ✅ Done |
-| 4 | Tree-guided retrieval (CLI → FastAPI) | ⏳ Next |
-| 5 | Qwen-7B generation + LangGraph gateway + Docker stack | ⏳ Planned |
+| 4 | Tree-guided retrieval (CLI + FastAPI + Docker) | ✅ Done |
+| 5 | Qwen-7B generation + LangGraph gateway + Docker stack | ⏳ Next |
 | 6 | QLoRA fine-tune + AWQ quantization per domain *(optional)* | ⏳ Planned |
 | 7 | Synthetic eval set + retrieval & generation metrics | ⏳ Planned |
 
@@ -277,6 +314,9 @@ PRISM-RAG/
 │   │   ├── summarizer.py        ← in-process Qwen2.5 summarizer (map-reduce)
 │   │   └── build.py             ← recursive per-source tree construction
 │   ├── retrieval/               ← Phase 4: tree-guided search
+│   │   ├── tree_search.py       ← top-down beam + collapsed re-rank (DB + numpy)
+│   │   ├── main.py              ← FastAPI: POST /retrieve, GET /healthz, /readyz
+│   │   └── Dockerfile           ← uv-based slim image (CPU default, CUDA via build-arg)
 │   └── generation/              ← Phase 5: Qwen inference
 │
 ├── gateway/                     ← Phase 5: FastAPI + LangGraph orchestrator
@@ -288,7 +328,7 @@ PRISM-RAG/
     ├── 02_ingest.py             ← ingest JSONL → documents + chunks
     ├── 03_embed_chunks.py       ← embed chunks + build HNSW index
     ├── 04_build_tree.py         ← cluster + summarize → internal nodes (Phase 3)
-    ├── 05_query_cli.py          ← (Phase 4)
+    ├── 05_query_cli.py          ← tree-guided retrieval CLI (Phase 4)
     └── 06_benchmark.py          ← (Phase 7)
 ```
 
@@ -332,6 +372,30 @@ python scripts/04_build_tree.py
 #     --domain medical     build a subset of domains
 #     --no-rebuild         keep existing internal nodes
 #   tip: set EMBED_DEVICE=cpu if the summarizer and BGE-M3 compete for VRAM
+
+# Phase 4a: Query the tree from the CLI (no service)
+python scripts/05_query_cli.py "What did Congress say about voter ID laws?"
+python scripts/05_query_cli.py "mRNA vaccine R&D financial impact" \
+    --domain finance --mode collapsed --k 5
+
+# Phase 4b: Run the retrieval service in Docker
+docker build -f agents/retrieval/Dockerfile \
+  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 \
+  -t prism-retrieval:gpu .
+
+docker run --rm --gpus all --network host \
+  -v ~/.cache/huggingface:/cache/hf \
+  --env-file .env \
+  prism-retrieval:gpu
+
+# Then in another terminal — readiness check + a query
+curl -s http://localhost:8001/readyz
+curl -s -X POST http://localhost:8001/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"voter ID laws","k":5}' | python -m json.tool
+
+# Browser-based playground (auto-generated Swagger UI):
+#   http://localhost:8001/docs
 ```
 
 **Verify everything worked:**
@@ -368,8 +432,33 @@ SELECT title, n_descendants FROM tree_nodes
 WHERE level >= 1 ORDER BY n_descendants DESC LIMIT 10;
 ```
 
-The `scripts/04_build_tree.py` run prints the same verification at the end,
-including a `n_descendants` vs leaf-count reconciliation per source.
+**Phase 4 smoke checks** (against the running service):
+
+```bash
+# liveness
+curl -s http://localhost:8001/healthz
+# expect: {"ok":true}
+
+# readiness (encoder loaded + DB reachable + leaves present)
+curl -s http://localhost:8001/readyz
+# expect: {"ok":true,"n_leaves":<your leaf count>}
+
+# top-down beam (default)
+curl -s -X POST http://localhost:8001/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"voter ID laws","mode":"top_down","k":5}'
+
+# collapsed + ancestor boost
+curl -s -X POST http://localhost:8001/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"voter ID laws","mode":"collapsed","alpha":0.3,"k":5}'
+```
+
+The `scripts/04_build_tree.py` run prints a `n_descendants` vs leaf-count
+reconciliation per source. `scripts/05_query_cli.py` prints the full
+traversal path and the top-`k` leaves with similarity scores — use it to
+sanity-check that retrieval picks the right domain and source before wiring
+up Phase 5.
 
 ---
 
