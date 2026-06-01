@@ -27,28 +27,35 @@ def reduce_dim(
     """UMAP reduce. Skipped if too few points to form the manifold."""
     n = len(emb)
     if n <= n_components + 2:
-        return emb.astype(np.float32)  # cluster in original space
+        return emb.astype(np.float32)
     import umap
 
     reducer = umap.UMAP(
         n_neighbors=min(n_neighbors, n - 1),
         n_components=min(n_components, n - 2),
-        metric=metric,                 # cosine: vectors are L2-normalized
+        metric=metric,
         random_state=random_state,
+        low_memory=(n > 20_000),   # ← ADD
+        verbose=(n > 20_000),      # ← ADD: see progress
     )
     return reducer.fit_transform(emb).astype(np.float32)
 
 
 def _hdbscan_labels(reduced: np.ndarray, min_cluster_size: int) -> np.ndarray:
     import hdbscan
-
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=max(2, min_cluster_size),
-        min_samples=None,                       # defaults to min_cluster_size
-        metric="euclidean",                     # UMAP output is euclidean-friendly
+        min_samples=None,
+        metric="euclidean",
         cluster_selection_method="eom",
+        core_dist_n_jobs=-1,       # ← ADD
     )
-    return clusterer.fit_predict(reduced)
+    labels = clusterer.fit_predict(reduced)
+    n_valid = len(np.unique(labels[labels != -1]))
+    n_noise = int((labels == -1).sum())
+    print(f"      HDBSCAN: n={len(reduced)} mcs={min_cluster_size} "
+            f"valid_clusters={n_valid} noise={n_noise}")
+    return labels
 
 
 def _reassign_noise(reduced: np.ndarray, labels: np.ndarray) -> np.ndarray:

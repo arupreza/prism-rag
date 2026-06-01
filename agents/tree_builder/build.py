@@ -113,17 +113,43 @@ def build_subtree(domain, source, encoder, summarizer, *, rebuild: bool = True) 
             if len(cur_ids) <= 1:
                 break
 
+            # Scale min_cluster_size to corpus size at this level
+            n_now = len(cur_ids)
+            mcs = max(MIN_CLUSTER_SIZE, min(int(n_now ** 0.5 / 2), 200))
+
             labels, sil = cluster_embeddings(
                 cur_emb,
-                min_cluster_size=MIN_CLUSTER_SIZE,
+                min_cluster_size=mcs,
                 n_components=UMAP_N_COMPONENTS,
             )
             uniq = np.unique(labels)
+
+            # Retry once with a smaller threshold before giving up
+            if uniq.size <= 1 and n_now > 50:
+                retry_mcs = max(5, mcs // 4)
+                print(f"    level {level}: 1 cluster at mcs={mcs} — retry mcs={retry_mcs}")
+                labels, sil = cluster_embeddings(
+                    cur_emb, min_cluster_size=retry_mcs, n_components=UMAP_N_COMPONENTS,
+                )
+                uniq = np.unique(labels)
+
+            # If still 1 cluster: create a single root summarizing the whole level, then stop.
+            # Do NOT break with zero inserts — that leaves leaves orphaned.
             if uniq.size <= 1:
-                print(f"    level {level}: 1 cluster — stop")
+                print(f"    level {level}: 1 cluster — emit single root and stop")
+                title, summary = summarizer.summarize(cur_texts)
+                vec = encoder.encode([summary])[0]
+                meta = {"method": "umap+hdbscan", "level": level, "size": n_now,
+                        "silhouette": sil, "single_root": True}
+                _insert_internal(
+                    conn, domain, source, level, title, summary, vec,
+                    int(sum(cur_desc)), meta, cur_ids,
+                )
+                conn.commit()
                 break
-            print(f"    level {level}: {len(cur_ids):,} -> {uniq.size} clusters "
-                f"(silhouette={sil})")
+
+            print(f"    level {level}: {n_now:,} -> {uniq.size} clusters "
+                f"(mcs={mcs}, silhouette={sil})")
 
             # 1) summarize each cluster (LLM)
             pending = []  # (title, summary, child_ids, n_desc, size)
