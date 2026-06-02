@@ -1,0 +1,9 @@
+# Qwen Coder
+
+hf download Qwen/Qwen2.5-Coder-32B-Instruct \
+    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/source_model/qwen_coder
+
+# Law LLM Model
+hf download Equall/SaulLM-141B-Instruct \
+    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/law_llm
+

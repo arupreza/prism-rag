@@ -216,10 +216,14 @@ __pycache__/
 # Local data is huge — exclude from git, keep on disk
 /data/**/*.jsonl
 
-checkpoints/source_model/
-checkpoints/fine_models/
+
 data/ai_tech/
 data/finance/
 data/medical/
 data/politics/
+PDF_DB/
+checkpoints/source_model/law_llm/
+checkpoints/source_model/qwen_2_5/
+checkpoints/source_model/qwen_coder/
+checkpoints/clallibration_data/legal/
 test.ipynb
