@@ -15,7 +15,7 @@ CALIB = "checkpoints/clallibration_data/legal"
 OUT   = "checkpoints/awq_models/law_llm_awq_w4a16"
 
 NUM_SAMPLES   = 128
-MAX_SEQ_LEN   = 512           # calibration length (not serving length)
+MAX_SEQ_LEN   = 1024           # calibration length (not serving length)
 REFUSAL_FRAC  = 0.30           # share of "not in context" samples
 random.seed(0)
 
@@ -96,7 +96,7 @@ print(f"calib samples: {len(ds)} | refusals: {sum(1 for r in rows if not r[2])}"
 recipe = [
     AWQModifier(
         ignore=["lm_head"],
-        scheme="W4A16_ASYM",
+        scheme="W4A16",
         targets=["Linear"],
     ),
 ]

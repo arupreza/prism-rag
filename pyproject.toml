@@ -19,4 +19,5 @@ dependencies = [
     "transformers<5.0",
     "umap-learn>=0.5.5",
     "uvicorn[standard]>=0.27",
+    "vllm>=0.9.2",
 ]
