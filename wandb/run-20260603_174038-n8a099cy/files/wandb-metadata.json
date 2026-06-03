@@ -1,0 +1,17 @@
+{
+  "os": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.11.7",
+  "startedAt": "2026-06-03T08:40:38.424273Z",
+  "program": "/home/lisa/Arupreza/PRISM-RAG/training/qwen_coder_fine_tune.py",
+  "codePath": "training/qwen_coder_fine_tune.py",
+  "codePathLocal": "training/qwen_coder_fine_tune.py",
+  "git": {
+    "remote": "https://github.com/Arupreza/PRISM-RAG.git",
+    "commit": "5c1a79f743e13704d326a8c84efafc5b95c8f123"
+  },
+  "email": "arupreza@sch.ac.kr",
+  "root": "/home/lisa/Arupreza/PRISM-RAG",
+  "host": "lisa",
+  "executable": "/home/lisa/Arupreza/PRISM-RAG/.venv/bin/python3",
+  "writerId": "hq8cvya9cllno44oyy7f1l55rh00cj8a"
+}

@@ -1,0 +1,40 @@
+{
+  "os": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.11.7",
+  "startedAt": "2026-06-03T09:13:36.086232Z",
+  "program": "/home/lisa/Arupreza/PRISM-RAG/training/qwen_coder_fine_tune.py",
+  "codePath": "training/qwen_coder_fine_tune.py",
+  "codePathLocal": "training/qwen_coder_fine_tune.py",
+  "git": {
+    "remote": "https://github.com/Arupreza/PRISM-RAG.git",
+    "commit": "5c1a79f743e13704d326a8c84efafc5b95c8f123"
+  },
+  "email": "arupreza@sch.ac.kr",
+  "root": "/home/lisa/Arupreza/PRISM-RAG",
+  "host": "lisa",
+  "executable": "/home/lisa/Arupreza/PRISM-RAG/.venv/bin/python3",
+  "cpu_count": 10,
+  "cpu_count_logical": 20,
+  "gpu": "NVIDIA RTX A6000",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "3936273580032",
+      "used": "2699867471872"
+    }
+  },
+  "memory": {
+    "total": "134972391424"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA RTX A6000",
+      "memoryTotal": "51527024640",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-73031d76-5a73-4808-a976-339ba6dbb6ab"
+    }
+  ],
+  "cudaVersion": "13.0",
+  "writerId": "fjjwswaawpa1ycxv7udbvq19he8exj27"
+}

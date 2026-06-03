@@ -4,10 +4,9 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # set before
 
 import glob
 import random
-from datasets import load_dataset, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from llmcompressor import oneshot
-from llmcompressor.modifiers.awq import AWQModifier
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from awq import AutoAWQForCausalLM
 
 # ----------------------------- config -----------------------------
 SRC   = "checkpoints/source_model/law_llm"
@@ -20,9 +19,15 @@ REFUSAL_FRAC  = 0.30           # share of "not in context" samples
 random.seed(0)
 
 # ----------------------------- model -----------------------------
-# CPU load: llm-compressor onloads layers to GPU one at a time (memory-safe)
-model = AutoModelForCausalLM.from_pretrained(SRC, torch_dtype="auto")
-tokenizer = AutoTokenizer.from_pretrained(SRC)
+# autoawq handles device placement internally during quantization
+# low_cpu_mem_usage keeps RAM tame on big models
+model = AutoAWQForCausalLM.from_pretrained(
+    SRC,
+    safetensors=True,
+    low_cpu_mem_usage=True,
+    use_cache=False,
+)
+tokenizer = AutoTokenizer.from_pretrained(SRC, trust_remote_code=True)
 
 # ----------------------------- datasets -----------------------------
 # cuad-qa: script loaders are dead in datasets v4 -> use HF auto-parquet branch
@@ -82,35 +87,32 @@ def build(ctx, q, ans):
     return tokenizer.apply_chat_template(msgs, tokenize=False)
 
 texts = [build(*r) for r in rows]
+# autoawq takes a list[str] directly as calib_data — no pre-tokenization needed
 
-# oneshot needs a HF Dataset, not a list
-ds = Dataset.from_list([
-    dict(tokenizer(t, truncation=True, max_length=MAX_SEQ_LEN, add_special_tokens=False))
-    for t in texts
-])
+print(f"calib samples: {len(texts)} | refusals: {sum(1 for r in rows if not r[2])}")
 
-print(f"calib samples: {len(ds)} | refusals: {sum(1 for r in rows if not r[2])}")
+# ----------------------------- AWQ quantize -----------------------------
+# W4A16 equivalent in autoawq: w_bit=4 weights, activations stay fp16 (default)
+# GEMM version is faster than GEMV on most modern GPUs (Ampere+)
+quant_config = {
+    "zero_point":   True,
+    "q_group_size": 128,
+    "w_bit":        4,
+    "version":      "GEMM",
+    # autoawq ignores lm_head and embed_tokens by default — no need to specify
+    "modules_to_not_convert": ["lm_head"],
+}
 
-# ----------------------------- AWQ recipe -----------------------------
-# scheme lives ON AWQModifier in current llm-compressor (no separate QuantizationModifier)
-recipe = [
-    AWQModifier(
-        ignore=["lm_head"],
-        scheme="W4A16",
-        targets=["Linear"],
-    ),
-]
-
-# ----------------------------- quantize + save -----------------------------
-oneshot(
-    model=model,
-    dataset=ds,
-    recipe=recipe,
-    max_seq_length=MAX_SEQ_LEN,
-    num_calibration_samples=NUM_SAMPLES,
-    output_dir=OUT,
+model.quantize(
+    tokenizer,
+    quant_config=quant_config,
+    calib_data=texts,                      # list[str] of pre-templated samples
+    max_calib_seq_len=MAX_SEQ_LEN,
+    max_calib_samples=NUM_SAMPLES,
 )
 
+# ----------------------------- save -----------------------------
+model.save_quantized(OUT)
 # ensure tokenizer + chat template ship with the checkpoint (vLLM needs them)
 tokenizer.save_pretrained(OUT)
 print(f"Saved AWQ checkpoint -> {OUT}")

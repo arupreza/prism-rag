@@ -1,23 +1,59 @@
 [project]
 name = "prism-rag"
 version = "0.1.0"
-description = "Add your description here"
+description = "PRISM-RAG: hierarchical retrieval-augmented generation"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.110",
-    "flagembedding>=1.2",
-    "hdbscan>=0.8.33",
-    "llmcompressor>=0.6.0.1",
-    "numpy<2.0",
-    "openai>=1.40",
-    "pgvector>=0.3",
+    # ── Phase 1–2: ingestion + embedding ──
     "psycopg[binary]>=3.1",
-    "pydantic>=2.5",
-    "python-dotenv>=1.2.2",
-    "scikit-learn>=1.3",
-    "transformers<5.0",
+    "pgvector>=0.3",
+    "python-dotenv>=1.0",
+    "FlagEmbedding>=1.2",
+    "numpy<2.0",
+
+    # ── Phase 3: tree build ──
     "umap-learn>=0.5.5",
+    "hdbscan>=0.8.33",
+    "scikit-learn>=1.3",
+    "openai>=1.40",
+
+    # ── Phase 4: retrieval API ──
+    "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    "pydantic>=2.5",
+
+    # ── LLM serving ──
+    "transformers<5.0",
     "vllm>=0.9.2",
+
+    # ── Quantization ──
+    "autoawq>=0.2.6",
+    "llmcompressor>=0.6.0.1",
+
+    # ── GRPO / RL fine-tuning stack ──
+    "trl>=0.14",
+    "peft>=0.13",
+    "accelerate>=1.0",
+    "bitsandbytes>=0.45",
+    "datasets>=3.0",
+    "wandb>=0.18",
+
+    # ── Build helpers ──
+    "ninja",
+    "packaging",
 ]
+
+[tool.uv]
+environments = ["sys_platform == 'linux'"]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch       = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+torchaudio  = { index = "pytorch-cu126" }
