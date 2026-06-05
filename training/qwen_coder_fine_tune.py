@@ -1,6 +1,5 @@
 """
 GRPO fine-tuning for Qwen Coder — plain TRL + PEFT + bnb 4-bit.
-No Unsloth dependency. Stable, reproducible.
 """
 import os
 import re
@@ -19,6 +18,9 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, PeftModel
 from trl import GRPOConfig, GRPOTrainer
+
+os.environ["WANDB_PROJECT"] = "PRISM-RAG"
+os.environ["WANDB_ENTITY"]  = "arupreza-soonchunhyang-university"
 
 # ─────────────────────────────────────────────────────────────────
 # Paths
@@ -66,7 +68,7 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
     quantization_config=bnb_config,
     device_map="auto",
-
+    attn_implementation="flash_attention_2",
     torch_dtype=torch.bfloat16 if is_bf16_supported() else torch.float16,
 )
 model.config.use_cache = False
@@ -161,7 +163,7 @@ EXEC_TIMEOUT = 8
 
 def run_python(code: str) -> Dict[str, Any]:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py",
-                                     delete=False, dir="/tmp") as f:
+                                        delete=False, dir="/tmp") as f:
         f.write(code)
         path = f.name
     try:
@@ -251,8 +253,8 @@ cfg = GRPOConfig(
     optim="paged_adamw_8bit",
 
     # Batching
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
 
     # GRPO
     num_generations=8,

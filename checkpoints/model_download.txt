@@ -7,19 +7,6 @@ hf download Qwen/Qwen2.5-Coder-32B-Instruct \
 hf download Equall/Saul-7B-Instruct-v1 \
     --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/law_llm
 
-# Coder Datasets
-huggingface-cli download open-r1/verifiable-coding-problems-python-10k \
-    --repo-type dataset \
-    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/clallibration_data/coder/verifiable-coding-problems-python-10k
-
-huggingface-cli download newfacade/LeetCodeDataset \
-    --repo-type dataset \
-    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/clallibration_data/coder/LeetCodeDataset
-
-huggingface-cli download codeparrot/apps \
-    --repo-type dataset \
-    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/clallibration_data/coder/apps
-
-huggingface-cli download iamtarun/python_code_instructions_18k_alpaca \
-    --repo-type dataset \
-    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/clallibration_data/coder/python_code_instructions_18k_alpaca
+# 1. verifiable-coding-problems-python-10k
+hf download open-r1/verifiable-coding-problems-python \
+    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/clallibration_data/coder
