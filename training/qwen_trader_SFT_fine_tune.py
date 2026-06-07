@@ -22,7 +22,7 @@ os.environ["WANDB_PROJECT"] = "PRISM-RAG-Trader"
 # Paths
 # ─────────────────────────────────────────────────────────────────
 BASE       = "/home/lisa/Arupreza/PRISM-RAG"
-MODEL_PATH = f"{BASE}/checkpoints/source_model/qwen_coder"   # change if you use a different base
+MODEL_PATH = f"{BASE}/checkpoints/source_model/qwen_2_5"   # change if you use a different base
 DATA_DIR   = f"{BASE}/checkpoints/clallibration_data/trader"
 SAVE_DIR   = f"{BASE}/checkpoints/awq_models"
 
