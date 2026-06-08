@@ -1,0 +1,40 @@
+{
+  "os": "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python": "CPython 3.11.7",
+  "startedAt": "2026-06-07T09:08:44.636538Z",
+  "program": "/home/lisa/Arupreza/PRISM-RAG/training/qwen_trader_SFT_fine_tune.py",
+  "codePath": "training/qwen_trader_SFT_fine_tune.py",
+  "codePathLocal": "training/qwen_trader_SFT_fine_tune.py",
+  "git": {
+    "remote": "https://github.com/Arupreza/PRISM-RAG.git",
+    "commit": "18da917fa5a8e548e0fae1893e7ced9c9ca22ca3"
+  },
+  "email": "arupreza@sch.ac.kr",
+  "root": "/home/lisa/Arupreza/PRISM-RAG",
+  "host": "lisa",
+  "executable": "/home/lisa/Arupreza/PRISM-RAG/.venv/bin/python3",
+  "cpu_count": 10,
+  "cpu_count_logical": 20,
+  "gpu": "NVIDIA RTX A6000",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "3936273580032",
+      "used": "2757252845568"
+    }
+  },
+  "memory": {
+    "total": "134972391424"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA RTX A6000",
+      "memoryTotal": "51527024640",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-73031d76-5a73-4808-a976-339ba6dbb6ab"
+    }
+  ],
+  "cudaVersion": "13.0",
+  "writerId": "h6g8fwpdwjmfi7jwc7pt40skbxy7bzba"
+}
