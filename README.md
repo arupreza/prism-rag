@@ -591,7 +591,7 @@ documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## License
 
-MIT.
+CC BY-NC 4.0 License
 
 ---
 
