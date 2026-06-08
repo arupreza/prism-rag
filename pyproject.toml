@@ -37,6 +37,7 @@ dependencies = [
     "ninja",
     "packaging",
     "matplotlib>=3.10.9",
+    "seaborn>=0.13.2",
 ]
 
 [tool.uv]
