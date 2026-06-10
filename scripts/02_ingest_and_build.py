@@ -1,11 +1,21 @@
 """
-End-to-end ingest: PDFs -> parents + children -> RAPTOR over children -> Postgres.
+End-to-end ingest: sources (PDFs + code) -> figures captioned by VLM ->
+parents + children -> RAPTOR over children -> Postgres.
+
+Pipeline per file:
+    load_any        extract text/code/image segments (images saved to disk)
+    caption_doc     Qwen2.5-VL writes an explanation into each image segment
+    chunk_segments  segments -> parent/child chunks (image caption is searchable)
+    embed           BGE-M3 over all children
+    insert_*        write parents + children (image_path carried for figures)
+Then RAPTOR summary tree is built over the children of the whole domain.
 """
 from __future__ import annotations
 import argparse
 from pathlib import Path
 
 from agents.ingestion.loader import iter_domain_sources, load_any
+from agents.ingestion.captioner import caption_doc
 from agents.ingestion.chunker import chunk_segments
 from agents.ingestion.encoder import embed
 from agents.ingestion.db import (
@@ -22,19 +32,26 @@ def ingest_domain(root: Path, domain: str) -> None:
     leaf_txt: list[str] = []     # use child text for clustering signal
 
     with conn() as c:
-        for pdf_path in iter_domain_sources(root, domain):
-            print(f"[{domain}] {pdf_path.name}")
-            doc = load_any(pdf_path, domain)  # type: ignore[arg-type]
+        for src_path in iter_domain_sources(root, domain):
+            print(f"[{domain}] {src_path.name}")
+            doc = load_any(src_path, domain)  # type: ignore[arg-type]
+
+            # VLM explains every extracted figure; the explanation becomes the
+            # searchable text of the image chunk. Skip-safe: no images -> no-op.
+            n_img = caption_doc(doc, domain)
+            if n_img:
+                print(f"  captioned {n_img} image(s)")
+
             parents = chunk_segments(doc.segments)
             if not parents:
                 continue
 
             doc_id = upsert_document(
-                c, domain=domain, source_path=str(pdf_path.resolve()),
+                c, domain=domain, source_path=str(src_path.resolve()),
                 title=doc.title, n_pages=doc.n_pages, sha256=doc.sha256,
             )
 
-            # Embed all children of all parents in one batch per PDF
+            # Embed all children of all parents in one batch per file
             all_children = []
             parent_to_slice = []  # (start, end) index slices into all_children
             for p in parents:
