@@ -142,3 +142,66 @@ def iter_domain_pdfs(root: Path, domain: Domain) -> Iterator[Path]:
     if not dom_dir.exists():
         return
     yield from sorted(dom_dir.rglob("*.pdf"))
+
+# ---------- code/source file support ----------
+
+CODE_EXTENSIONS = {
+    ".py":   "python",
+    ".pyi":  "python",
+    ".cpp":  "cpp",
+    ".cc":   "cpp",
+    ".cxx":  "cpp",
+    ".h":    "cpp",
+    ".hpp":  "cpp",
+    ".rs":   "rust",
+    ".js":   "javascript",
+    ".ts":   "typescript",
+    ".jsx":  "javascript",
+    ".tsx":  "typescript",
+}
+
+SKIP_DIRS = {
+    "__pycache__", ".git", ".github", "node_modules", ".venv", "venv",
+    "dist", "build", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "output", "testing", "tests",
+}
+
+
+def load_source_file(path: Path, domain: Domain) -> LoadedDoc:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        return LoadedDoc(path=path, domain=domain, title=path.stem,
+                         n_pages=0, sha256=_sha256(path), segments=[])
+    language = CODE_EXTENSIONS.get(path.suffix.lower())
+    seg = Segment(text=text, page=1, kind="code", language=language)
+    return LoadedDoc(path=path, domain=domain, title=path.stem,
+                     n_pages=1, sha256=_sha256(path), segments=[seg])
+
+
+def _should_skip(p: Path) -> bool:
+    return any(part in SKIP_DIRS for part in p.parts)
+
+
+def iter_domain_sources(root: Path, domain: Domain) -> Iterator[Path]:
+    dom_dir = root / domain
+    if not dom_dir.exists():
+        return
+    files: list[Path] = []
+    for p in dom_dir.rglob("*"):
+        if not p.is_file() or _should_skip(p):
+            continue
+        ext = p.suffix.lower()
+        if ext == ".pdf":
+            files.append(p)
+        elif domain == "ai" and ext in CODE_EXTENSIONS:
+            files.append(p)
+    yield from sorted(files)
+
+
+def load_any(path: Path, domain: Domain) -> LoadedDoc:
+    if path.suffix.lower() == ".pdf":
+        return load_pdf(path, domain)
+    return load_source_file(path, domain)

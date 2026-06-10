@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from agents.ingestion.loader import iter_domain_pdfs, load_pdf
+from agents.ingestion.loader import iter_domain_sources, load_any
 from agents.ingestion.chunker import chunk_segments
 from agents.ingestion.encoder import embed
 from agents.ingestion.db import (
@@ -22,9 +22,9 @@ def ingest_domain(root: Path, domain: str) -> None:
     leaf_txt: list[str] = []     # use child text for clustering signal
 
     with conn() as c:
-        for pdf_path in iter_domain_pdfs(root, domain):
+        for pdf_path in iter_domain_sources(root, domain):
             print(f"[{domain}] {pdf_path.name}")
-            doc = load_pdf(pdf_path, domain)  # type: ignore[arg-type]
+            doc = load_any(pdf_path, domain)  # type: ignore[arg-type]
             parents = chunk_segments(doc.segments)
             if not parents:
                 continue

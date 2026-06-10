@@ -228,3 +228,4 @@ checkpoints/source_model/qwen_coder/
 checkpoints/clallibration_data/legal/
 unsloth_compiled_cache/
 init_test_model.ipynb
+tutorial.ipynb

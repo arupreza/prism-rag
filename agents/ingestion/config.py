@@ -36,7 +36,8 @@ DOMAIN_SOURCES: dict[str, list[str]] = {
 # ── Database ─────────────────────────────────────────────────────────────────
 PG_DSN = os.getenv(
     "PG_DSN",
-    "postgresql://postgres:postgres@localhost:5432/prism_rag",
+    # Must match docker-compose (host 5433 -> container 5432, user/db = prism/prism_rag).
+    "postgresql://prism:prism@localhost:5433/prism_rag",
 )
 
 
