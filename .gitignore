@@ -222,6 +222,7 @@ data/finance/
 data/medical/
 data/politics/
 PDF_DB/
+data/
 checkpoints/source_model/law_llm/
 checkpoints/source_model/qwen_2_5/
 checkpoints/source_model/qwen_coder/

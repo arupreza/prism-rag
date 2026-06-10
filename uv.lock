@@ -215,6 +215,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b3/58/58426405b68555a12364533b1426e7f3ccf59ce6fd7754b1dabb8c7de44a/autoawq-0.2.9.tar.gz", hash = "sha256:f3397687118c7d23c769de0de05ff1dca8950a2644acbe1b6eb1399c691fe7ee", size = 74313, upload-time = "2025-05-11T09:02:26.341Z" }
 
 [[package]]
+name = "autoawq-kernels"
+version = "0.0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch", marker = "sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/b0/e9f7142e58e5539892cb0558e9a24d894f095a9904b4014f892a43c39229/autoawq_kernels-0.0.9-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:fe800a6538691afaa77abe7c8b2b0a121351843f048d54e11d617d604dcba48f", size = 37377774, upload-time = "2024-11-16T15:43:08.917Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/ef/613310287e009d35b740b76b96913ea87e5522d7f91845bf817d4ed0abd9/autoawq_kernels-0.0.9-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:4c41a71af1d5a75e52c9833b9c48237b04d3b0eee26d712fc1b074af9135afc8", size = 37423485, upload-time = "2024-11-16T15:43:18.56Z" },
+]
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.14.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2371,6 +2383,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "accelerate", marker = "sys_platform == 'linux'" },
     { name = "autoawq", marker = "sys_platform == 'linux'" },
+    { name = "autoawq-kernels", marker = "sys_platform == 'linux'" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
     { name = "datasets", marker = "sys_platform == 'linux'" },
     { name = "fastapi", marker = "sys_platform == 'linux'" },
@@ -2405,6 +2418,7 @@ dependencies = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.0" },
     { name = "autoawq", specifier = ">=0.2.6" },
+    { name = "autoawq-kernels", specifier = ">=0.0.9" },
     { name = "bitsandbytes", specifier = ">=0.45" },
     { name = "datasets", specifier = ">=3.0" },
     { name = "fastapi", specifier = ">=0.110" },

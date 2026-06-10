@@ -24,6 +24,8 @@ CODE_LINE_HINT = re.compile(
 # ── Image handling (all domains) ─────────────────────────────────────────────
 IMAGE_DIR      = Path(os.getenv("PRISM_IMAGE_DIR", "./data/_images"))
 MIN_IMAGE_AREA = int(os.getenv("PRISM_MIN_IMAGE_AREA", str(64 * 64)))  # px²; skip logos/rules
+SCAN_TEXT_MAX  = int(os.getenv("PRISM_SCAN_TEXT_MAX", "100"))          # <this many chars + big image => scanned page
+SCAN_AREA_FRAC = float(os.getenv("PRISM_SCAN_AREA_FRAC", "0.5"))       # image must cover >this frac of page
 CAPTION_HINT   = re.compile(r"^\s*(fig(?:ure)?\.?|table|chart|scheme|plot|diagram)\b", re.I)
 
 
@@ -35,6 +37,7 @@ class Segment:
     language: str | None = None
     image_path: str | None = None
     bbox: tuple[float, float, float, float] | None = None
+    is_scan: bool = False          # page-image with ~no text layer -> transcribe, not caption
 
 
 @dataclass
@@ -196,8 +199,23 @@ def load_pdf(path: Path, domain: Domain) -> LoadedDoc:
     segs: list[Segment] = []
     code_aware = domain == "ai"
     for i, page in enumerate(doc):
-        segs.extend(_extract_page(page, page_no=i + 1, code_aware=code_aware))
-        segs.extend(_extract_images(page, page_no=i + 1, doc=doc, sha=sha))
+        page_no = i + 1
+        text_segs = _extract_page(page, page_no=page_no, code_aware=code_aware)
+        img_segs = _extract_images(page, page_no=page_no, doc=doc, sha=sha)
+
+        # Scanned/image-only page: little or no text layer + a page-covering image.
+        # Tag those images so the VLM transcribes (OCR) them instead of captioning.
+        page_text_len = sum(len(s.text.strip()) for s in text_segs)
+        if img_segs and page_text_len < SCAN_TEXT_MAX:
+            page_area = abs(page.rect.width * page.rect.height) or 1.0
+            for s in img_segs:
+                if s.bbox:
+                    x0, y0, x1, y1 = s.bbox
+                    if abs((x1 - x0) * (y1 - y0)) > SCAN_AREA_FRAC * page_area:
+                        s.is_scan = True
+
+        segs.extend(text_segs)
+        segs.extend(img_segs)
     return LoadedDoc(
         path=path,
         domain=domain,

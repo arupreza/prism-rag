@@ -9,6 +9,7 @@ import numpy as np
 from contextlib import contextmanager
 
 import psycopg
+from psycopg.types.json import Json
 from pgvector.psycopg import register_vector
 
 DSN = os.getenv("PG_DSN", "postgresql://prism:prism@localhost:5433/prism_rag")
@@ -30,7 +31,7 @@ def upsert_document(c, *, domain, source_path, title, n_pages, sha256, metadata=
             title=EXCLUDED.title, n_pages=EXCLUDED.n_pages, sha256=EXCLUDED.sha256
         RETURNING id;
         """,
-        (domain, source_path, title, n_pages, sha256, metadata or {}),
+        (domain, source_path, title, n_pages, sha256, Json(metadata or {})),
     ).fetchone()
     return row[0]
 
@@ -40,9 +41,9 @@ def insert_parent(c, *, document_id, domain, parent, mean_emb):
     row = c.execute(
         """
         INSERT INTO chunks
-          (document_id, domain, level, content, content_type, language,
-           page_start, page_end, token_count, embedding,
-           parent_chunk_id, is_searchable, image_path)
+            (document_id, domain, level, content, content_type, language,
+            page_start, page_end, token_count, embedding,
+            parent_chunk_id, is_searchable, image_path)
         VALUES (%s,%s,0,%s,%s,%s,%s,%s,%s,%s,NULL,FALSE,%s)
         RETURNING id;
         """,

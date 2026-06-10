@@ -122,12 +122,14 @@ def _text_segment_to_parents(seg: Segment) -> list[ParentChunk]:
             content=para, token_count=tl,
             page_start=seg.page, page_end=seg.page,
             content_type="text", language=None,
+            image_path=seg.image_path,        # set for transcribed scans; None otherwise
         )
         if tl <= MAX_PARENT_TOKENS:
             parent.children = [
                 ChildChunk(content=para, token_count=tl,
                            page_start=seg.page, page_end=seg.page,
-                           content_type="text", language=None)
+                           content_type="text", language=None,
+                           image_path=seg.image_path)
             ]
         else:
             parent.children = _shard_children(para, parent)

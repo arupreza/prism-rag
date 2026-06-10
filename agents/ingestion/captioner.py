@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 # Resolve from repo root so it works regardless of CWD (captioner.py is at
 # agents/ingestion/, so parents[2] == repo root — same trick config.py uses).
 _REPO_ROOT     = Path(__file__).resolve().parents[2]
-_DEFAULT_VLM   = _REPO_ROOT / "checkpoints/awq_models/qwen_vision_awq_w4a16"
+_DEFAULT_VLM   = _REPO_ROOT / "checkpoints/source_model/vision_model"  # fp16, NOT awq
 MODEL_ID       = os.getenv("VLM_MODEL", str(_DEFAULT_VLM))
 MAX_NEW_TOKENS = int(os.getenv("VLM_MAX_NEW_TOKENS", "256"))
 DEVICE_MAP     = os.getenv("VLM_DEVICE_MAP", "auto")
@@ -43,6 +43,15 @@ PROMPTS = {
     ),
 }
 
+# Used for scanned / image-only pages (no text layer) -> verbatim OCR, not a caption.
+OCR_PROMPT = (
+    "Transcribe ALL text in this image verbatim, preserving the reading order and "
+    "paragraph breaks. Output only the transcribed text — no commentary, no markdown "
+    "fences, no headings you invent. If the image has no readable text, output a single "
+    "short line describing it."
+)
+OCR_MAX_NEW_TOKENS = int(os.getenv("VLM_OCR_MAX_NEW_TOKENS", "1536"))  # a dense page >> 256
+
 _model = None
 _proc = None
 
@@ -51,15 +60,14 @@ def _load() -> None:
     global _model, _proc
     if _model is not None:
         return
-    print(f"[captioner] loading AWQ VLM from {MODEL_ID} ...")
-    # AWQ W4A16: kernels run in fp16. Do NOT force bf16 — let transformers read
-    # the dtype from the checkpoint's quantization_config. Requires `autoawq`
-    # (+ autoawq-kernels) installed; transformers auto-detects awq from config.json.
+    print(f"[captioner] loading VLM from {MODEL_ID} ...")
+    # Local fp16/bf16 vision checkpoint (NOT quantized) -> no autoawq/Triton path.
+    # torch_dtype="auto" reads the model's native dtype from its config.
     _model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         MODEL_ID,
         torch_dtype="auto",
         device_map=DEVICE_MAP,
-        local_files_only=True,     # never reach for the HF hub
+        local_files_only=True,     # weights are local -> never hit the HF hub
         trust_remote_code=True,
     )
     _proc = AutoProcessor.from_pretrained(
@@ -70,14 +78,20 @@ def _load() -> None:
 
 
 @torch.inference_mode()
-def caption_image(image_path: str, domain: str, pdf_caption: str = "") -> str:
+def caption_image(image_path: str, domain: str, pdf_caption: str = "",
+                  transcribe: bool = False) -> str:
     _load()
-    instr = PROMPTS.get(domain, PROMPTS["ai"])
-    if pdf_caption:
-        instr += (
-            f'\nThe document\'s own caption reads: "{pdf_caption}". '
-            "Use it for context but describe what the image actually shows."
-        )
+    if transcribe:
+        instr = OCR_PROMPT
+        max_new = OCR_MAX_NEW_TOKENS
+    else:
+        instr = PROMPTS.get(domain, PROMPTS["ai"])
+        if pdf_caption:
+            instr += (
+                f'\nThe document\'s own caption reads: "{pdf_caption}". '
+                "Use it for context but describe what the image actually shows."
+            )
+        max_new = MAX_NEW_TOKENS
     img = Image.open(image_path).convert("RGB")
     messages = [{
         "role": "user",
@@ -85,22 +99,38 @@ def caption_image(image_path: str, domain: str, pdf_caption: str = "") -> str:
     }]
     text = _proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = _proc(text=[text], images=[img], padding=True, return_tensors="pt").to(_model.device)
-    out = _model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False)
+    out = _model.generate(**inputs, max_new_tokens=max_new, do_sample=False)
     trimmed = out[0][inputs.input_ids.shape[1]:]
     return _proc.decode(trimmed, skip_special_tokens=True).strip()
 
 
-def caption_doc(doc: "LoadedDoc", domain: str) -> int:
-    """Fill each image segment's text with '<pdf caption>\\n<VLM caption>'. Returns count."""
-    n = 0
+def caption_doc(doc: "LoadedDoc", domain: str) -> tuple[int, int]:
+    """Resolve every image segment in place.
+
+    - Normal figure -> caption appended to text (kind stays 'image').
+    - Scanned page (seg.is_scan) -> verbatim transcription; promoted to kind='text'
+      so it flows through normal text chunking, while keeping image_path for provenance.
+
+    Returns (n_captioned_figures, n_transcribed_pages).
+    """
+    n_cap = n_ocr = 0
     for seg in doc.segments:
         if seg.kind != "image" or not seg.image_path:
             continue
+        scan = getattr(seg, "is_scan", False)
         try:
-            vlm = caption_image(seg.image_path, domain, pdf_caption=seg.text)
+            out = caption_image(seg.image_path, domain,
+                                pdf_caption="" if scan else seg.text,
+                                transcribe=scan)
         except Exception as e:  # one bad image must not kill the whole doc
             print(f"[captioner] WARN failed on {seg.image_path}: {e}")
             continue
-        seg.text = f"{seg.text}\n{vlm}".strip() if seg.text else vlm
-        n += 1
-    return n
+        if scan:
+            if out:
+                seg.text = out
+                seg.kind = "text"     # transcription is real document text
+                n_ocr += 1
+        else:
+            seg.text = f"{seg.text}\n{out}".strip() if seg.text else out
+            n_cap += 1
+    return n_cap, n_ocr

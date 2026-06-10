@@ -36,11 +36,10 @@ def ingest_domain(root: Path, domain: str) -> None:
             print(f"[{domain}] {src_path.name}")
             doc = load_any(src_path, domain)  # type: ignore[arg-type]
 
-            # VLM explains every extracted figure; the explanation becomes the
-            # searchable text of the image chunk. Skip-safe: no images -> no-op.
-            n_img = caption_doc(doc, domain)
-            if n_img:
-                print(f"  captioned {n_img} image(s)")
+            # VLM resolves figures (caption) and scanned pages (verbatim OCR).
+            n_cap, n_ocr = caption_doc(doc, domain)
+            if n_cap or n_ocr:
+                print(f"  captioned {n_cap} figure(s), transcribed {n_ocr} scanned page(s)")
 
             parents = chunk_segments(doc.segments)
             if not parents:
@@ -108,7 +107,7 @@ def ingest_domain(root: Path, domain: str) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=Path, default=Path("data/raw"))
+    ap.add_argument("--root", type=Path, default=Path("PDF_DB"))
     ap.add_argument("--domains", nargs="+",
                     default=["immigration", "trading", "ai"],
                     choices=["immigration", "trading", "ai"])
