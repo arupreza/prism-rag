@@ -7,6 +7,10 @@ hf download Qwen/Qwen2.5-Coder-32B-Instruct \
 hf download Equall/Saul-7B-Instruct-v1 \
     --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/law_llm
 
+# Image Explenation LLM Model
+hf download Qwen/Qwen2.5-VL-3B-Instruct \
+    --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/vision_model
+
 # 1. verifiable-coding-problems-python-10k
 hf download open-r1/verifiable-coding-problems-python \
     --local-dir /home/lisa/Arupreza/PRISM-RAG/checkpoints/clallibration_data/coder

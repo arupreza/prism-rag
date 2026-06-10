@@ -1,12 +1,14 @@
-"""Initialize the PRISM-RAG database schema.
+"""Initialize / update the PRISM-RAG database schema.
 
-Run this ONCE after creating the database. Safe to re-run (uses IF NOT
-EXISTS everywhere).
+init.sql is IDEMPOTENT and NON-DESTRUCTIVE: it creates what is missing and
+evolves the schema in place (new enum values, new columns, new indexes). It
+never drops tables, so re-running this is SAFE on a populated database — your
+ingested chunks are preserved. This is the single source of truth; there is no
+separate migrations file.
 
 Prereqs:
-    1. Create the database:  createdb prism_rag
-    2. pgvector extension is installable (Postgres 14+ with pgvector package).
-    3. PG_DSN env var (or .env) points at the right database.
+    1. Postgres is up (docker compose up -d postgres) with pgvector available.
+    2. PG_DSN env var (or .env) points at the right database.
 
 Usage (from repo root):
     python scripts/01_init_db.py
@@ -28,10 +30,11 @@ SCHEMA_PATH = REPO_ROOT / "init.sql"
 
 def main() -> None:
     sql = SCHEMA_PATH.read_text()
-    with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:
+    # autocommit so ALTER TYPE ... ADD VALUE never trips the
+    # "can't add enum value inside a transaction" restriction on any PG version.
+    with psycopg.connect(PG_DSN, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(sql)
-        conn.commit()
-    print(f"[ok] schema applied from {SCHEMA_PATH}")
+    print(f"[ok] schema applied (idempotent) from {SCHEMA_PATH}")
     print(f"[ok] DSN: {PG_DSN}")
 
 
