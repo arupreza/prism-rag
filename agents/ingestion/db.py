@@ -1,12 +1,12 @@
 """
 Postgres writer (psycopg3 + pgvector).
 Parent-child aware: parent rows are storage-only, children are searchable.
+Image chunks carry image_path so retrieval can display the figure.
 """
 from __future__ import annotations
 import os
 import numpy as np
 from contextlib import contextmanager
-from typing import Iterable
 
 import psycopg
 from pgvector.psycopg import register_vector
@@ -42,15 +42,15 @@ def insert_parent(c, *, document_id, domain, parent, mean_emb):
         INSERT INTO chunks
           (document_id, domain, level, content, content_type, language,
            page_start, page_end, token_count, embedding,
-           parent_chunk_id, is_searchable)
-        VALUES (%s,%s,0,%s,%s,%s,%s,%s,%s,%s,NULL,FALSE)
+           parent_chunk_id, is_searchable, image_path)
+        VALUES (%s,%s,0,%s,%s,%s,%s,%s,%s,%s,NULL,FALSE,%s)
         RETURNING id;
         """,
         (
             document_id, domain,
             parent.content, parent.content_type, parent.language,
             parent.page_start, parent.page_end, parent.token_count,
-            mean_emb,
+            mean_emb, parent.image_path,
         ),
     ).fetchone()
     return row[0]
@@ -63,8 +63,8 @@ def insert_children(c, *, document_id, domain, parent_id, children, embeddings):
         INSERT INTO chunks
             (document_id, domain, level, content, content_type, language,
             page_start, page_end, token_count, embedding,
-            parent_chunk_id, is_searchable)
-        VALUES (%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+            parent_chunk_id, is_searchable, image_path)
+        VALUES (%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
         RETURNING id;
     """
     for ck, emb in zip(children, embeddings):
@@ -74,7 +74,7 @@ def insert_children(c, *, document_id, domain, parent_id, children, embeddings):
                 document_id, domain,
                 ck.content, ck.content_type, ck.language,
                 ck.page_start, ck.page_end, ck.token_count,
-                emb, parent_id,
+                emb, parent_id, ck.image_path,
             ),
         ).fetchone()[0]
         ids.append(rid)
@@ -105,6 +105,5 @@ def insert_summary(c, *, domain, level, cluster_id, children_ids, content, embed
 def mean_pool(embs: list[list[float]]) -> list[float]:
     arr = np.array(embs, dtype=np.float32)
     v = arr.mean(axis=0)
-    # re-normalize for cosine
     n = np.linalg.norm(v)
     return (v / n).tolist() if n > 0 else v.tolist()

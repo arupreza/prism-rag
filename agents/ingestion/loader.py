@@ -1,11 +1,13 @@
 """
-PDF loader for PRISM-RAG v2.
+PDF + source-file loader for PRISM-RAG v2.
 - PyMuPDF for text + layout.
 - For 'ai' domain: detects code blocks via font (monospace) + indentation heuristics.
-- Returns List[Page] with per-page (text_segments, code_segments).
+- Images/figures (all domains): saved to disk, emitted as kind="image" segments.
+  The caption (PDF caption + later a VLM caption) becomes the searchable text.
+- Returns LoadedDoc with a flat list[Segment].
 """
 from __future__ import annotations
-import hashlib, re
+import hashlib, os, re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Literal
@@ -19,13 +21,20 @@ CODE_LINE_HINT = re.compile(
     r"^\s*(def |class |import |from |#include|using namespace|fn |let |const |async |await |return |if |for |while |//|#)"
 )
 
+# ── Image handling (all domains) ─────────────────────────────────────────────
+IMAGE_DIR      = Path(os.getenv("PRISM_IMAGE_DIR", "./data/_images"))
+MIN_IMAGE_AREA = int(os.getenv("PRISM_MIN_IMAGE_AREA", str(64 * 64)))  # px²; skip logos/rules
+CAPTION_HINT   = re.compile(r"^\s*(fig(?:ure)?\.?|table|chart|scheme|plot|diagram)\b", re.I)
+
 
 @dataclass
 class Segment:
     text: str
     page: int
-    kind: Literal["text", "code"] = "text"
+    kind: Literal["text", "code", "image"] = "text"
     language: str | None = None
+    image_path: str | None = None
+    bbox: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -85,7 +94,6 @@ def _extract_page(page: fitz.Page, page_no: int, code_aware: bool) -> list[Segme
         if blk.get("type") != 0:  # not text block
             continue
         lines = blk.get("lines", [])
-        # decide if block is predominantly monospace -> code
         mono_chars = total_chars = 0
         block_text_lines = []
         for ln in lines:
@@ -120,19 +128,82 @@ def _extract_page(page: fitz.Page, page_no: int, code_aware: bool) -> list[Segme
     return segs
 
 
+# ── image extraction (runs for every domain) ────────────────────────────────
+def _save_image(data: bytes, ext: str, sha: str, page_no: int, idx: int) -> Path:
+    dst = IMAGE_DIR / sha
+    dst.mkdir(parents=True, exist_ok=True)
+    out = dst / f"p{page_no:04d}_img{idx:02d}.{ext}"
+    out.write_bytes(data)
+    return out
+
+
+def _pair_caption(img_bbox, text_blocks) -> str:
+    """Nearest text block starting below the image; prefer 'Figure/Table' leads."""
+    _, _, _, iy1 = img_bbox
+    best, best_gap = "", 1e9
+    for (bx, by, bx1, by1), txt in text_blocks:
+        if by < iy1 - 2:                  # caption must begin below the image
+            continue
+        gap = by - iy1
+        if gap < best_gap and (CAPTION_HINT.search(txt) or gap < 40):
+            best, best_gap = txt.strip(), gap
+    return best
+
+
+def _extract_images(page: fitz.Page, page_no: int, doc: fitz.Document, sha: str) -> list[Segment]:
+    info = page.get_text("dict")
+    text_blocks = [
+        (b["bbox"], "".join(sp["text"] for ln in b.get("lines", []) for sp in ln["spans"]))
+        for b in info["blocks"] if b.get("type") == 0
+    ]
+    segs: list[Segment] = []
+    idx = 0
+    for b in info["blocks"]:
+        if b.get("type") != 1:            # 1 = image block
+            continue
+        if b.get("width", 0) * b.get("height", 0) < MIN_IMAGE_AREA:
+            continue
+        data = b.get("image")
+        ext = b.get("ext", "png")
+        if not data:
+            # Fallback: dict block carried no inline bytes (xobject) -> pull via xref.
+            xref = b.get("number") or b.get("xref")
+            if not xref:
+                continue
+            try:
+                ei = doc.extract_image(int(xref))
+                data, ext = ei["image"], ei["ext"]
+            except Exception:
+                continue
+        idx += 1
+        path = _save_image(data, ext, sha, page_no, idx)
+        segs.append(
+            Segment(
+                text=_pair_caption(b["bbox"], text_blocks),  # PDF caption; VLM fills the rest
+                page=page_no,
+                kind="image",
+                image_path=str(path),
+                bbox=tuple(round(float(x), 1) for x in b["bbox"]),
+            )
+        )
+    return segs
+
+
 def load_pdf(path: Path, domain: Domain) -> LoadedDoc:
     doc = fitz.open(path)
+    sha = _sha256(path)
     title = (doc.metadata or {}).get("title") or path.stem
     segs: list[Segment] = []
     code_aware = domain == "ai"
     for i, page in enumerate(doc):
         segs.extend(_extract_page(page, page_no=i + 1, code_aware=code_aware))
+        segs.extend(_extract_images(page, page_no=i + 1, doc=doc, sha=sha))
     return LoadedDoc(
         path=path,
         domain=domain,
         title=title,
         n_pages=doc.page_count,
-        sha256=_sha256(path),
+        sha256=sha,
         segments=segs,
     )
 
@@ -143,21 +214,14 @@ def iter_domain_pdfs(root: Path, domain: Domain) -> Iterator[Path]:
         return
     yield from sorted(dom_dir.rglob("*.pdf"))
 
-# ---------- code/source file support ----------
 
+# ---------- code/source file support ----------
 CODE_EXTENSIONS = {
-    ".py":   "python",
-    ".pyi":  "python",
-    ".cpp":  "cpp",
-    ".cc":   "cpp",
-    ".cxx":  "cpp",
-    ".h":    "cpp",
-    ".hpp":  "cpp",
-    ".rs":   "rust",
-    ".js":   "javascript",
-    ".ts":   "typescript",
-    ".jsx":  "javascript",
-    ".tsx":  "typescript",
+    ".py": "python", ".pyi": "python",
+    ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".h": "cpp", ".hpp": "cpp",
+    ".rs": "rust",
+    ".js": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
 }
 
 SKIP_DIRS = {
