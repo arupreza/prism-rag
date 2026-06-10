@@ -1,44 +1,184 @@
-"""Token-aware overlapping text chunker.
-
-We chunk on TOKENS (not characters or words) because the embedding model has
-a hard token limit. The tokenizer used here MUST be the same one the encoder
-will use later — that's why we load BGE-M3's tokenizer specifically.
-
-Overlap preserves context across chunk boundaries: a sentence cut in half is
-still retrievable from either chunk.
-
-The tokenizer is loaded once at module import (small, CPU-only, fast).
 """
-from transformers import AutoTokenizer
+Paragraph-aware chunker with parent/child split.
 
-from .config import EMBED_MODEL, CHUNK_TOKENS, CHUNK_OVERLAP
+Strategy:
+    1. Split each Segment into paragraphs (blank-line split, with merging of short orphans).
+    2. If a paragraph <= MAX_PARENT_TOKENS  -> ONE parent row, ONE child row (identical content).
+    3. If a paragraph >  MAX_PARENT_TOKENS  -> ONE parent row + N child shards (token-window splits).
+    4. Code segments: each function/class block is a parent. Long bodies -> shard children.
+
+Returns parents list, where each parent carries its own children list.
+"""
+from __future__ import annotations
+import re
+from dataclasses import dataclass, field
+from typing import Literal
+
+import tiktoken
+from .loader import Segment
+
+_ENC = tiktoken.get_encoding("cl100k_base")
+
+# Tunables
+MAX_PARENT_TOKENS = 1200     # if paragraph is bigger, shard it
+CHILD_TOKENS      = 350      # embedding-optimal window
+CHILD_OVERLAP     = 60
+MIN_PARA_TOKENS   = 40       # merge tiny paragraphs into next one
+
+CODE_BOUNDARY = re.compile(
+    r"(?m)^(?=\s*(?:def |async def |class |fn |pub fn |function |#include|namespace ))"
+)
+PARA_SPLIT = re.compile(r"\n\s*\n+")   # blank-line paragraph boundary
 
 
-_TOK = AutoTokenizer.from_pretrained(EMBED_MODEL)
+@dataclass
+class ChildChunk:
+    content: str
+    token_count: int
+    # inherited from parent
+    page_start: int
+    page_end: int
+    content_type: Literal["text", "code"]
+    language: str | None
 
 
-def chunk_text(text: str,
-            chunk_tokens: int = CHUNK_TOKENS,
-            overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split text into <=chunk_tokens-token pieces with `overlap` token overlap.
+@dataclass
+class ParentChunk:
+    content: str
+    token_count: int
+    page_start: int
+    page_end: int
+    content_type: Literal["text", "code"]
+    language: str | None
+    children: list[ChildChunk] = field(default_factory=list)
 
-    Returns [text] unchanged if it already fits in one chunk — most news
-    articles will be a single chunk; full PubMed papers will be 10–30.
-    """
-    ids = _TOK.encode(text, add_special_tokens=False)
-    if len(ids) <= chunk_tokens:
-        return [text]
 
-    step = chunk_tokens - overlap
-    chunks: list[str] = []
-    for i in range(0, len(ids), step):
-        window = ids[i:i + chunk_tokens]
-        chunks.append(_TOK.decode(window))
-        if i + chunk_tokens >= len(ids):
+def _tok_len(s: str) -> int:
+    return len(_ENC.encode(s, disallowed_special=()))
+
+
+# ---------- paragraph splitting (text) ----------
+def _paragraphs(text: str) -> list[str]:
+    raw = [p.strip() for p in PARA_SPLIT.split(text) if p.strip()]
+    if not raw:
+        return []
+    # merge tiny paragraphs forward
+    merged: list[str] = []
+    buf: list[str] = []
+    buf_tok = 0
+    for p in raw:
+        tl = _tok_len(p)
+        if tl < MIN_PARA_TOKENS:
+            buf.append(p)
+            buf_tok += tl
+            continue
+        if buf:
+            merged.append("\n\n".join(buf + [p]))
+            buf, buf_tok = [], 0
+        else:
+            merged.append(p)
+    if buf:
+        if merged:
+            merged[-1] = merged[-1] + "\n\n" + "\n\n".join(buf)
+        else:
+            merged.append("\n\n".join(buf))
+    return merged
+
+
+def _shard_children(text: str, parent: ParentChunk) -> list[ChildChunk]:
+    """Token-window shard of an oversized parent into embedding-sized children."""
+    toks = _ENC.encode(text, disallowed_special=())
+    out: list[ChildChunk] = []
+    step = CHILD_TOKENS - CHILD_OVERLAP
+    for start in range(0, len(toks), step):
+        win = toks[start : start + CHILD_TOKENS]
+        if not win:
             break
-    return chunks
+        out.append(
+            ChildChunk(
+                content=_ENC.decode(win),
+                token_count=len(win),
+                page_start=parent.page_start,
+                page_end=parent.page_end,
+                content_type=parent.content_type,
+                language=parent.language,
+            )
+        )
+        if start + CHILD_TOKENS >= len(toks):
+            break
+    return out
 
 
-def count_tokens(text: str) -> int:
-    """Return the BGE-M3 token count of `text`. Cheap; no need to cache."""
-    return len(_TOK.encode(text, add_special_tokens=False))
+def _text_segment_to_parents(seg: Segment) -> list[ParentChunk]:
+    parents: list[ParentChunk] = []
+    for para in _paragraphs(seg.text):
+        tl = _tok_len(para)
+        parent = ParentChunk(
+            content=para,
+            token_count=tl,
+            page_start=seg.page,
+            page_end=seg.page,
+            content_type="text",
+            language=None,
+        )
+        if tl <= MAX_PARENT_TOKENS:
+            # child == parent (single-shard case)
+            parent.children = [
+                ChildChunk(
+                    content=para,
+                    token_count=tl,
+                    page_start=seg.page,
+                    page_end=seg.page,
+                    content_type="text",
+                    language=None,
+                )
+            ]
+        else:
+            parent.children = _shard_children(para, parent)
+        parents.append(parent)
+    return parents
+
+
+# ---------- code splitting ----------
+def _code_segment_to_parents(seg: Segment) -> list[ParentChunk]:
+    parts = [p for p in CODE_BOUNDARY.split(seg.text) if p.strip()]
+    if not parts:
+        parts = [seg.text]
+
+    parents: list[ParentChunk] = []
+    for block in parts:
+        tl = _tok_len(block)
+        parent = ParentChunk(
+            content=block.rstrip(),
+            token_count=tl,
+            page_start=seg.page,
+            page_end=seg.page,
+            content_type="code",
+            language=seg.language,
+        )
+        if tl <= MAX_PARENT_TOKENS:
+            parent.children = [
+                ChildChunk(
+                    content=block.rstrip(),
+                    token_count=tl,
+                    page_start=seg.page,
+                    page_end=seg.page,
+                    content_type="code",
+                    language=seg.language,
+                )
+            ]
+        else:
+            parent.children = _shard_children(block, parent)
+        parents.append(parent)
+    return parents
+
+
+# ---------- public API ----------
+def chunk_segments(segments: list[Segment]) -> list[ParentChunk]:
+    out: list[ParentChunk] = []
+    for seg in segments:
+        if seg.kind == "code":
+            out.extend(_code_segment_to_parents(seg))
+        else:
+            out.extend(_text_segment_to_parents(seg))
+    return out

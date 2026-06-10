@@ -1,92 +1,144 @@
-"""JSONL → documents + chunks.
-
-Reads one .jsonl file and inserts each non-empty line as a document, splitting
-long text into chunks. Idempotent thanks to UNIQUE (source, external_id) —
-re-running after a crash just resumes from where it stopped.
-
-Periodic commits (every 1000 docs) cap the loss window on hard failures.
 """
-import json
+PDF loader for PRISM-RAG v2.
+- PyMuPDF for text + layout.
+- For 'ai' domain: detects code blocks via font (monospace) + indentation heuristics.
+- Returns List[Page] with per-page (text_segments, code_segments).
+"""
+from __future__ import annotations
+import hashlib, re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator, Literal
 
-import psycopg
+import fitz  # PyMuPDF
 
-from .chunker import chunk_text, count_tokens
+Domain = Literal["immigration", "trading", "ai"]
+
+MONO_FONT_HINTS = ("Mono", "Courier", "Consolas", "Menlo", "Code", "Fira")
+CODE_LINE_HINT = re.compile(
+    r"^\s*(def |class |import |from |#include|using namespace|fn |let |const |async |await |return |if |for |while |//|#)"
+)
 
 
-def ingest_jsonl(
-    conn: psycopg.Connection,
-    path: Path,
-    domain: str,
-    source: str,
-    sample: int | None = None,
-) -> tuple[int, int]:
-    """Insert documents + chunks from a JSONL file.
+@dataclass
+class Segment:
+    text: str
+    page: int
+    kind: Literal["text", "code"] = "text"
+    language: str | None = None
 
-    Args:
-        conn:    psycopg connection (autocommit OFF).
-        path:    path to .jsonl file.
-        domain:  e.g. "politics".
-        source:  e.g. "cc_news".
-        sample:  cap on inserted documents (None = all).
 
-    Returns:
-        (n_docs_inserted, n_chunks_inserted)
-    """
-    n_docs = n_chunks = 0
+@dataclass
+class LoadedDoc:
+    path: Path
+    domain: Domain
+    title: str
+    n_pages: int
+    sha256: str
+    segments: list[Segment] = field(default_factory=list)
 
-    with open(path, encoding="utf-8") as f, conn.cursor() as cur:
-        for line in f:
-            if sample is not None and n_docs >= sample:
-                break
 
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:
-                continue   # skip malformed lines
+def _sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for blk in iter(lambda: f.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
 
-            text = (r.get("text") or "").strip()
-            if not text:
-                continue   # skip empty docs
 
-            # Insert document. ON CONFLICT makes the call idempotent:
-            # if (source, external_id) already exists, RETURNING returns nothing
-            # and we skip chunking for that doc.
-            cur.execute(
-                """INSERT INTO documents
-                    (external_id, domain, source, title, text, metadata, n_tokens)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (source, external_id) DO NOTHING
-                RETURNING doc_id""",
-                (
-                    r.get("id"),
-                    domain,
-                    source,
-                    r.get("title"),
-                    text,
-                    json.dumps(r.get("metadata", {})),
-                    count_tokens(text),
-                ),
+def _is_code_span(span: dict) -> bool:
+    font = span.get("font", "")
+    return any(h in font for h in MONO_FONT_HINTS)
+
+
+def _detect_language(code: str) -> str | None:
+    s = code[:500]
+    if re.search(r"\bdef\s+\w+\(|\bimport\s+\w+|^from\s+\w+\s+import", s, re.M):
+        return "python"
+    if re.search(r"#include\s*<|::|std::", s):
+        return "cpp"
+    if re.search(r"\bfn\s+\w+\(|let\s+mut\b|impl\s+\w+", s):
+        return "rust"
+    if re.search(r"\bfunction\s+\w+\(|=>\s*{|const\s+\w+\s*=", s):
+        return "javascript"
+    return None
+
+
+def _extract_page(page: fitz.Page, page_no: int, code_aware: bool) -> list[Segment]:
+    if not code_aware:
+        txt = page.get_text("text").strip()
+        return [Segment(text=txt, page=page_no, kind="text")] if txt else []
+
+    # block-level extraction with font info
+    blocks = page.get_text("dict")["blocks"]
+    segs: list[Segment] = []
+    buf_text: list[str] = []
+
+    def flush_text():
+        if buf_text:
+            joined = "\n".join(buf_text).strip()
+            if joined:
+                segs.append(Segment(text=joined, page=page_no, kind="text"))
+            buf_text.clear()
+
+    for blk in blocks:
+        if blk.get("type") != 0:  # not text block
+            continue
+        lines = blk.get("lines", [])
+        # decide if block is predominantly monospace -> code
+        mono_chars = total_chars = 0
+        block_text_lines = []
+        for ln in lines:
+            line_str = "".join(sp["text"] for sp in ln["spans"])
+            block_text_lines.append(line_str)
+            for sp in ln["spans"]:
+                n = len(sp["text"])
+                total_chars += n
+                if _is_code_span(sp):
+                    mono_chars += n
+        block_text = "\n".join(block_text_lines).rstrip()
+        if not block_text.strip():
+            continue
+
+        mono_ratio = mono_chars / max(total_chars, 1)
+        code_hint = bool(CODE_LINE_HINT.search(block_text))
+        is_code = mono_ratio > 0.6 or (mono_ratio > 0.3 and code_hint)
+
+        if is_code:
+            flush_text()
+            segs.append(
+                Segment(
+                    text=block_text,
+                    page=page_no,
+                    kind="code",
+                    language=_detect_language(block_text),
+                )
             )
-            row = cur.fetchone()
-            if not row:
-                continue   # already in DB from a previous run
-            doc_id = row[0]
-            n_docs += 1
+        else:
+            buf_text.append(block_text)
+    flush_text()
+    return segs
 
-            # Chunk and bulk-insert
-            pieces = chunk_text(text)
-            cur.executemany(
-                """INSERT INTO chunks (doc_id, chunk_idx, text, n_tokens)
-                VALUES (%s, %s, %s, %s)""",
-                [(doc_id, idx, c, count_tokens(c)) for idx, c in enumerate(pieces)],
-            )
-            n_chunks += len(pieces)
 
-            # Bound loss on crash: commit every 1000 docs.
-            if n_docs % 1000 == 0:
-                conn.commit()
-                print(f"  [{source}] docs={n_docs:,}  chunks={n_chunks:,}")
+def load_pdf(path: Path, domain: Domain) -> LoadedDoc:
+    doc = fitz.open(path)
+    title = (doc.metadata or {}).get("title") or path.stem
+    segs: list[Segment] = []
+    code_aware = domain == "ai"
+    for i, page in enumerate(doc):
+        segs.extend(_extract_page(page, page_no=i + 1, code_aware=code_aware))
+    return LoadedDoc(
+        path=path,
+        domain=domain,
+        title=title,
+        n_pages=doc.page_count,
+        sha256=_sha256(path),
+        segments=segs,
+    )
 
-    conn.commit()
-    return n_docs, n_chunks
+
+def iter_domain_pdfs(root: Path, domain: Domain) -> Iterator[Path]:
+    dom_dir = root / domain
+    if not dom_dir.exists():
+        return
+    yield from sorted(dom_dir.rglob("*.pdf"))

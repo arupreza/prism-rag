@@ -1,198 +1,155 @@
-"""Phase 3 orchestrator — build the hierarchical topic tree (RAPTOR).
-
-Per (domain, source):
-    load level-0 leaves
-    repeat for level = 1..MAX_TREE_LEVELS:
-        UMAP + HDBSCAN cluster current nodes
-        summarize each cluster (Qwen-32B)  -> internal node text
-        batch-embed summaries (BGE-M3)     -> internal node vectors
-        insert internal nodes, link children -> parent
-        stop when a level collapses to a single cluster
-    next level operates on the summaries just created
-
-Builds PER SOURCE, not per domain: the architecture routes domain → source →
-clusters → leaves, so each source gets its own subtree and `source` stays
-non-null on every internal node. (The schema's "source NULL only at root"
-comment anticipates an optional domain-level root tying sources together — not
-created here; Phase 4 retrieval filters by domain and walks parent_id, which
-does not require level uniformity across sources.)
+"""
+RAPTOR tree builder.
+Algorithm:
+  level 0 = leaf chunks (already in DB)
+  while n_nodes_at_level > MIN_CLUSTER:
+     reduce dim (UMAP)
+     soft-cluster (BIC-selected GMM, threshold prob)
+     for each cluster: concat children text -> LLM summary -> embed -> store as parent at next level
 """
 from __future__ import annotations
-
+import os
 import numpy as np
-from psycopg.types.json import Jsonb
+from dataclasses import dataclass
+from typing import Callable
 
-from agents.ingestion.config import (
-    DOMAIN_SOURCES,
-    MAX_TREE_LEVELS,
-    MIN_CLUSTER_SIZE,
-    UMAP_N_COMPONENTS,
-)
-from agents.ingestion.db import connect
-from agents.ingestion.encoder import BGEM3Encoder
-from agents.tree_builder.cluster import cluster_embeddings
-from agents.tree_builder.summarizer import ClusterSummarizer
+import umap
+from sklearn.mixture import GaussianMixture
 
-
-# ── DB helpers ───────────────────────────────────────────────────────────────
-def _load_level0(conn, domain: str, source: str):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT node_id, embedding, summary, n_descendants
-            FROM tree_nodes
-            WHERE domain = %s AND source = %s AND level = 0
-            ORDER BY node_id
-            """,
-            (domain, source),
-        )
-        rows = cur.fetchall()
-    ids = [r[0] for r in rows]
-    emb = np.asarray([r[1] for r in rows], dtype=np.float32)
-    texts = [r[2] for r in rows]
-    desc = [int(r[3]) for r in rows]
-    return ids, emb, texts, desc
+UMAP_DIM = int(os.getenv("RAPTOR_UMAP_DIM", "10"))
+MAX_LEVELS = int(os.getenv("RAPTOR_MAX_LEVELS", "3"))
+MIN_CLUSTER = int(os.getenv("RAPTOR_MIN_CLUSTER", "5"))
+PROB_THRESHOLD = float(os.getenv("RAPTOR_PROB_THRESHOLD", "0.10"))
+MAX_K = int(os.getenv("RAPTOR_MAX_K", "50"))
+RNG = 42
 
 
-def reset_subtree(conn, domain: str, source: str) -> None:
-    """Idempotent rebuild prep.
+@dataclass
+class Node:
+    id: int           # placeholder ID; real ID assigned after DB insert
+    level: int
+    content: str
+    embedding: list[float]
+    children: list[int]
+    cluster_id: int | None = None
 
-    FOOTGUN: tree_nodes.parent_id is `REFERENCES tree_nodes ON DELETE CASCADE`.
-    Leaves point at level-1 nodes, so deleting internal nodes would CASCADE and
-    delete the leaves too — wiping all of Phase 2. Break every link first, then
-    delete internal nodes (now childless, so nothing cascades into leaves).
+
+def _reduce(emb: np.ndarray, n_neighbors: int | None = None) -> np.ndarray:
+    n = emb.shape[0]
+    if n <= UMAP_DIM + 1:
+        return emb
+    nn = n_neighbors or max(2, min(int(n ** 0.5), n - 1))
+    reducer = umap.UMAP(
+        n_neighbors=nn,
+        n_components=min(UMAP_DIM, n - 2),
+        metric="cosine",
+        random_state=RNG,
+    )
+    return reducer.fit_transform(emb)
+
+
+def _best_k(emb: np.ndarray) -> int:
+    n = emb.shape[0]
+    max_k = min(MAX_K, n - 1)
+    if max_k < 2:
+        return 1
+    bics = []
+    ks = list(range(1, max_k + 1))
+    for k in ks:
+        gm = GaussianMixture(n_components=k, random_state=RNG, reg_covar=1e-4)
+        gm.fit(emb)
+        bics.append(gm.bic(emb))
+    return ks[int(np.argmin(bics))]
+
+
+def _soft_cluster(emb: np.ndarray) -> list[list[int]]:
+    """Return list of cluster_id -> [node_indices] (soft assignment)."""
+    if emb.shape[0] < 2:
+        return [[i for i in range(emb.shape[0])]]
+    k = _best_k(emb)
+    if k <= 1:
+        return [[i for i in range(emb.shape[0])]]
+    gm = GaussianMixture(n_components=k, random_state=RNG, reg_covar=1e-4).fit(emb)
+    probs = gm.predict_proba(emb)
+    clusters: list[list[int]] = [[] for _ in range(k)]
+    for i in range(emb.shape[0]):
+        for c in range(k):
+            if probs[i, c] >= PROB_THRESHOLD:
+                clusters[c].append(i)
+    # ensure each node lands somewhere
+    assigned = {i for cl in clusters for i in cl}
+    if len(assigned) < emb.shape[0]:
+        argmax = probs.argmax(axis=1)
+        for i in range(emb.shape[0]):
+            if i not in assigned:
+                clusters[int(argmax[i])].append(i)
+    return [c for c in clusters if c]
+
+
+# --- Summarizer hook (inject your LLM call) ---------------------------------
+Summarizer = Callable[[list[str], str], str]
+# signature: summarizer(child_texts, domain) -> summary_text
+
+
+def build_tree(
+    leaf_ids: list[int],
+    leaf_embeddings: list[list[float]],
+    leaf_contents: list[str],
+    domain: str,
+    summarizer: Summarizer,
+    embed_fn: Callable[[list[str]], list[list[float]]],
+) -> list[Node]:
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE tree_nodes SET parent_id = NULL WHERE domain = %s AND source = %s",
-            (domain, source),
-        )
-        cur.execute(
-            "DELETE FROM tree_nodes WHERE domain = %s AND source = %s AND level >= 1",
-            (domain, source),
-        )
-    conn.commit()
+    Returns parent nodes only (levels 1..MAX_LEVELS). Leaves stay as already-inserted DB rows.
+    Caller is responsible for inserting Node rows and wiring parent_ids/children_ids.
+    """
+    parents: list[Node] = []
+    cur_ids = list(leaf_ids)
+    cur_emb = np.array(leaf_embeddings, dtype=np.float32)
+    cur_txt = list(leaf_contents)
 
+    for level in range(1, MAX_LEVELS + 1):
+        if len(cur_ids) <= MIN_CLUSTER:
+            break
+        reduced = _reduce(cur_emb)
+        clusters = _soft_cluster(reduced)
+        if len(clusters) <= 1:
+            break
 
-def _insert_internal(
-    conn, domain, source, level, title, summary, vec, n_desc, meta, child_ids
-):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO tree_nodes
-              (domain, source, level, is_leaf, parent_id, chunk_id,
-               title, summary, n_descendants, cluster_meta, embedding, embed_input)
-            VALUES (%s, %s, %s, false, NULL, NULL,
-                    %s, %s, %s, %s, %s, %s)
-            RETURNING node_id
-            """,
-            (domain, source, level, title, summary, n_desc, Jsonb(meta), vec, summary),
-        )
-        nid = cur.fetchone()[0]
-        cur.execute(
-            "UPDATE tree_nodes SET parent_id = %s WHERE node_id = ANY(%s)",
-            (nid, child_ids),
-        )
-    return nid
+        next_ids: list[int] = []
+        next_emb: list[list[float]] = []
+        next_txt: list[str] = []
+        summaries: list[str] = []
+        cluster_children: list[list[int]] = []
 
+        for c_idx, members in enumerate(clusters):
+            child_texts = [cur_txt[i] for i in members]
+            child_ids = [cur_ids[i] for i in members]
+            summary = summarizer(child_texts, domain)
+            summaries.append(summary)
+            cluster_children.append(child_ids)
 
-# ── core build ───────────────────────────────────────────────────────────────
-def build_subtree(domain, source, encoder, summarizer, *, rebuild: bool = True) -> None:
-    with connect() as conn:
-        if rebuild:
-            reset_subtree(conn, domain, source)
-
-        cur_ids, cur_emb, cur_texts, cur_desc = _load_level0(conn, domain, source)
-        if len(cur_ids) < 2:
-            print(f"  [{domain}/{source}] {len(cur_ids)} leaves — skip")
-            return
-        print(f"  [{domain}/{source}] {len(cur_ids):,} leaves")
-
-        for level in range(1, MAX_TREE_LEVELS + 1):
-            if len(cur_ids) <= 1:
-                break
-
-            # Scale min_cluster_size to corpus size at this level
-            n_now = len(cur_ids)
-            mcs = max(MIN_CLUSTER_SIZE, min(int(n_now ** 0.5 / 2), 200))
-
-            labels, sil = cluster_embeddings(
-                cur_emb,
-                min_cluster_size=mcs,
-                n_components=UMAP_N_COMPONENTS,
+        emb_batch = embed_fn(summaries)
+        # Node IDs here are negative placeholders; caller reassigns after INSERT RETURNING id
+        for c_idx, (summary, emb, children) in enumerate(
+            zip(summaries, emb_batch, cluster_children)
+        ):
+            placeholder = -(len(parents) + 1)
+            node = Node(
+                id=placeholder,
+                level=level,
+                content=summary,
+                embedding=emb,
+                children=children,
+                cluster_id=c_idx,
             )
-            uniq = np.unique(labels)
+            parents.append(node)
+            next_ids.append(placeholder)
+            next_emb.append(emb)
+            next_txt.append(summary)
 
-            # Retry once with a smaller threshold before giving up
-            if uniq.size <= 1 and n_now > 50:
-                retry_mcs = max(5, mcs // 4)
-                print(f"    level {level}: 1 cluster at mcs={mcs} — retry mcs={retry_mcs}")
-                labels, sil = cluster_embeddings(
-                    cur_emb, min_cluster_size=retry_mcs, n_components=UMAP_N_COMPONENTS,
-                )
-                uniq = np.unique(labels)
+        cur_ids = next_ids
+        cur_emb = np.array(next_emb, dtype=np.float32)
+        cur_txt = next_txt
 
-            # If still 1 cluster: create a single root summarizing the whole level, then stop.
-            # Do NOT break with zero inserts — that leaves leaves orphaned.
-            if uniq.size <= 1:
-                print(f"    level {level}: 1 cluster — emit single root and stop")
-                title, summary = summarizer.summarize(cur_texts)
-                vec = encoder.encode([summary])[0]
-                meta = {"method": "umap+hdbscan", "level": level, "size": n_now,
-                        "silhouette": sil, "single_root": True}
-                _insert_internal(
-                    conn, domain, source, level, title, summary, vec,
-                    int(sum(cur_desc)), meta, cur_ids,
-                )
-                conn.commit()
-                break
-
-            print(f"    level {level}: {n_now:,} -> {uniq.size} clusters "
-                f"(mcs={mcs}, silhouette={sil})")
-
-            # 1) summarize each cluster (LLM)
-            pending = []  # (title, summary, child_ids, n_desc, size)
-            for c in uniq:
-                idx = np.where(labels == c)[0]
-                title, summary = summarizer.summarize([cur_texts[i] for i in idx])
-                pending.append(
-                    (
-                        title,
-                        summary,
-                        [cur_ids[i] for i in idx],
-                        int(sum(cur_desc[i] for i in idx)),
-                        int(idx.size),
-                    )
-                )
-
-            # 2) one batch encode for the whole level
-            vecs = encoder.encode([p[1] for p in pending])
-
-            # 3) insert + link
-            new_ids, new_texts, new_desc = [], [], []
-            for (title, summary, child_ids, n_desc, size), vec in zip(pending, vecs):
-                meta = {
-                    "method": "umap+hdbscan",
-                    "level": level,
-                    "size": size,
-                    "silhouette": sil,
-                }
-                nid = _insert_internal(
-                    conn, domain, source, level, title, summary, vec, n_desc, meta, child_ids
-                )
-                new_ids.append(nid)
-                new_texts.append(summary)
-                new_desc.append(n_desc)
-            conn.commit()
-
-            cur_ids, cur_emb, cur_texts, cur_desc = new_ids, vecs, new_texts, new_desc
-
-
-def build_all(domains: list[str] | None = None, rebuild: bool = True) -> None:
-    encoder = BGEM3Encoder()
-    summarizer = ClusterSummarizer()
-    targets = DOMAIN_SOURCES if domains is None else {d: DOMAIN_SOURCES[d] for d in domains}
-    for domain, sources in targets.items():
-        for source in sources:
-            build_subtree(domain, source, encoder, summarizer, rebuild=rebuild)
+    return parents

@@ -1,36 +1,38 @@
-"""BGE-M3 dense encoder.
-
-Returns L2-normalized 1024-d vectors. Uses FlagEmbedding (the canonical
-BGE-M3 library) with fp16 on GPU. Falls back to CPU gracefully.
 """
-import numpy as np
-from FlagEmbedding import BGEM3FlagModel
+Encoder: BAAI/bge-m3 (1024-dim) by default. Single source of truth for embed dim.
+Switch model via env EMB_MODEL.
+"""
+from __future__ import annotations
+import os
+from typing import Sequence
 
-from .config import EMBED_MODEL, EMBED_DEVICE, EMBED_BATCH
+import torch
+from sentence_transformers import SentenceTransformer
+
+EMB_MODEL = os.getenv("EMB_MODEL", "BAAI/bge-m3")
+EMB_DIM = int(os.getenv("EMB_DIM", "1024"))
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+_model: SentenceTransformer | None = None
 
 
-class BGEM3Encoder:
-    def __init__(
-        self,
-        model_name: str = EMBED_MODEL,
-        device: str = EMBED_DEVICE,
-        batch_size: int = EMBED_BATCH,
-    ):
-        self.batch_size = batch_size
-        use_fp16 = device.startswith("cuda")
-        self.model = BGEM3FlagModel(model_name, use_fp16=use_fp16, device=device)
+def get_encoder() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        _model = SentenceTransformer(EMB_MODEL, device=DEVICE)
+        if DEVICE == "cuda":
+            _model.half()
+    return _model
 
-    def encode(self, texts: list[str], max_length: int = 512) -> np.ndarray:
-        """Encode texts → (N, 1024) L2-normalized float32 array."""
-        out = self.model.encode(
-            texts,
-            batch_size=self.batch_size,
-            max_length=max_length,
-            return_dense=True,
-            return_sparse=False,
-            return_colbert_vecs=False,
-        )["dense_vecs"]  # already float32, (N, 1024)
-        # enforce unit norm — BGE-M3 usually returns normalized, but be safe
-        norms = np.linalg.norm(out, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        return out / norms
+
+def embed(texts: Sequence[str], batch_size: int = 32) -> list[list[float]]:
+    m = get_encoder()
+    vecs = m.encode(
+        list(texts),
+        batch_size=batch_size,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        show_progress_bar=False,
+    )
+    assert vecs.shape[1] == EMB_DIM, f"dim mismatch: {vecs.shape[1]} != {EMB_DIM}"
+    return vecs.tolist()

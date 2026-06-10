@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # ── Phase 1–2: ingestion + embedding ──
-    "psycopg[binary]>=3.1",
+    "psycopg[binary,pool]>=3.1",
     "pgvector>=0.3",
     "python-dotenv>=1.0",
     "FlagEmbedding>=1.2",
@@ -38,6 +38,10 @@ dependencies = [
     "packaging",
     "matplotlib>=3.10.9",
     "seaborn>=0.13.2",
+    "pymupdf>=1.27.2.3",
+    "tiktoken>=0.13.0",
+    "sentence-transformers>=5.5.1",
+    "torch>=2.7.0",
 ]
 
 [tool.uv]
