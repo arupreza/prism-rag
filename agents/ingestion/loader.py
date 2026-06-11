@@ -3,7 +3,7 @@ PDF + source-file loader for PRISM-RAG v2.
 - PyMuPDF for text + layout.
 - For 'ai' domain: detects code blocks via font (monospace) + indentation heuristics.
 - Images/figures (all domains): saved to disk, emitted as kind="image" segments.
-  The caption (PDF caption + later a VLM caption) becomes the searchable text.
+    The caption (PDF caption + later a VLM caption) becomes the searchable text.
 - Returns LoadedDoc with a flat list[Segment].
 """
 from __future__ import annotations
@@ -256,11 +256,11 @@ def load_source_file(path: Path, domain: Domain) -> LoadedDoc:
         text = path.read_text(encoding="utf-8", errors="replace")
     if not text.strip():
         return LoadedDoc(path=path, domain=domain, title=path.stem,
-                         n_pages=0, sha256=_sha256(path), segments=[])
+                            n_pages=0, sha256=_sha256(path), segments=[])
     language = CODE_EXTENSIONS.get(path.suffix.lower())
     seg = Segment(text=text, page=1, kind="code", language=language)
     return LoadedDoc(path=path, domain=domain, title=path.stem,
-                     n_pages=1, sha256=_sha256(path), segments=[seg])
+                        n_pages=1, sha256=_sha256(path), segments=[seg])
 
 
 def _should_skip(p: Path) -> bool:

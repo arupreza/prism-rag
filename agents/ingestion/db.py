@@ -15,6 +15,11 @@ from pgvector.psycopg import register_vector
 DSN = os.getenv("PG_DSN", "postgresql://prism:prism@localhost:5433/prism_rag")
 
 
+def _clean(s):
+    """Strip NUL (0x00) bytes — illegal in Postgres text/jsonb. Other chars kept."""
+    return s.replace("\x00", "") if isinstance(s, str) else s
+
+
 @contextmanager
 def conn():
     with psycopg.connect(DSN, autocommit=False) as c:
@@ -31,7 +36,7 @@ def upsert_document(c, *, domain, source_path, title, n_pages, sha256, metadata=
             title=EXCLUDED.title, n_pages=EXCLUDED.n_pages, sha256=EXCLUDED.sha256
         RETURNING id;
         """,
-        (domain, source_path, title, n_pages, sha256, Json(metadata or {})),
+        (domain, source_path, _clean(title), n_pages, sha256, Json(metadata or {})),
     ).fetchone()
     return row[0]
 
@@ -41,15 +46,15 @@ def insert_parent(c, *, document_id, domain, parent, mean_emb):
     row = c.execute(
         """
         INSERT INTO chunks
-            (document_id, domain, level, content, content_type, language,
-            page_start, page_end, token_count, embedding,
-            parent_chunk_id, is_searchable, image_path)
+          (document_id, domain, level, content, content_type, language,
+           page_start, page_end, token_count, embedding,
+           parent_chunk_id, is_searchable, image_path)
         VALUES (%s,%s,0,%s,%s,%s,%s,%s,%s,%s,NULL,FALSE,%s)
         RETURNING id;
         """,
         (
             document_id, domain,
-            parent.content, parent.content_type, parent.language,
+            _clean(parent.content), parent.content_type, parent.language,
             parent.page_start, parent.page_end, parent.token_count,
             mean_emb, parent.image_path,
         ),
@@ -73,7 +78,7 @@ def insert_children(c, *, document_id, domain, parent_id, children, embeddings):
             sql,
             (
                 document_id, domain,
-                ck.content, ck.content_type, ck.language,
+                _clean(ck.content), ck.content_type, ck.language,
                 ck.page_start, ck.page_end, ck.token_count,
                 emb, parent_id, ck.image_path,
             ),
@@ -84,6 +89,7 @@ def insert_children(c, *, document_id, domain, parent_id, children, embeddings):
 
 def insert_summary(c, *, domain, level, cluster_id, children_ids, content, embedding):
     """RAPTOR summary node (level >= 1). Always searchable."""
+    content = _clean(content)
     row = c.execute(
         """
         INSERT INTO chunks
